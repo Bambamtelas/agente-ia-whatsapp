@@ -16,6 +16,39 @@ export interface EvolutionRawInstance {
   };
 }
 
+const EVOLUTION_API_URL = (
+  (import.meta as any).env?.VITE_EVOLUTION_API_URL ||
+  (import.meta as any).env?.EVOLUTION_API_URL ||
+  'https://api.doratec.site'
+).replace(/\/$/, '');
+
+const EVOLUTION_API_KEY =
+  (import.meta as any).env?.VITE_EVOLUTION_API_KEY ||
+  (import.meta as any).env?.EVOLUTION_API_KEY ||
+  '1003be981b063ae8c3146ba09557a56245312581afb4891d36c316281665eb28';
+
+async function evolutionFetch(endpoint: string, options: RequestInit = {}): Promise<Response> {
+  const headers = {
+    'apikey': EVOLUTION_API_KEY,
+    ...(options.headers as Record<string, string> || {}),
+  };
+
+  // Tenta chamada direta à Evolution API (doratec.site com CORS habilitado)
+  try {
+    const directUrl = `${EVOLUTION_API_URL}${endpoint}`;
+    const directRes = await fetch(directUrl, { ...options, headers });
+    if (directRes.ok || directRes.status < 500) {
+      return directRes;
+    }
+  } catch (err) {
+    console.warn('[Evolution API] Chamada direta falhou, tentando fallback local...', err);
+  }
+
+  // Fallback via proxy local /api/evolution/
+  const proxyUrl = `/api/evolution${endpoint}`;
+  return fetch(proxyUrl, options);
+}
+
 export function mapEvolutionToInstance(raw: EvolutionRawInstance): WhatsAppInstance {
   const statusMap: Record<string, WhatsAppInstance['connection_status']> = {
     open: 'connected',
@@ -28,7 +61,7 @@ export function mapEvolutionToInstance(raw: EvolutionRawInstance): WhatsAppInsta
   return {
     id: raw.id,
     name: raw.profileName ? `${raw.name} (${raw.profileName})` : raw.name,
-    server_url: 'https://api.doratec.site',
+    server_url: EVOLUTION_API_URL,
     api_key: '••••••••',
     connection_status: statusMap[raw.connectionStatus] || 'disconnected',
     phone_number: cleanPhone,
@@ -41,7 +74,7 @@ export function mapEvolutionToInstance(raw: EvolutionRawInstance): WhatsAppInsta
 // Buscar todas as instâncias da Evolution API
 export async function fetchEvolutionInstances(): Promise<{ instances: WhatsAppInstance[]; raw: EvolutionRawInstance[] }> {
   try {
-    const res = await fetch('/api/evolution/instance/fetchInstances');
+    const res = await evolutionFetch('/instance/fetchInstances');
     if (!res.ok) {
       throw new Error(`Erro ${res.status}: Não foi possível carregar as instâncias`);
     }
@@ -57,7 +90,7 @@ export async function fetchEvolutionInstances(): Promise<{ instances: WhatsAppIn
 
 // Obter QR Code de conexão
 export async function getEvolutionQRCode(instanceName: string): Promise<{ base64?: string; pairingCode?: string; code?: string }> {
-  const res = await fetch(`/api/evolution/instance/connect/${encodeURIComponent(instanceName)}`);
+  const res = await evolutionFetch(`/instance/connect/${encodeURIComponent(instanceName)}`);
   if (!res.ok) {
     throw new Error('Falha ao obter QR code');
   }
@@ -66,7 +99,7 @@ export async function getEvolutionQRCode(instanceName: string): Promise<{ base64
 
 // Criar nova instância
 export async function createEvolutionInstance(instanceName: string): Promise<any> {
-  const res = await fetch('/api/evolution/instance/create', {
+  const res = await evolutionFetch('/instance/create', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -92,7 +125,7 @@ export async function createEvolutionInstance(instanceName: string): Promise<any
 
 // Reiniciar instância
 export async function restartEvolutionInstance(instanceName: string): Promise<any> {
-  const res = await fetch(`/api/evolution/instance/restart/${encodeURIComponent(instanceName)}`, {
+  const res = await evolutionFetch(`/instance/restart/${encodeURIComponent(instanceName)}`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -103,7 +136,7 @@ export async function restartEvolutionInstance(instanceName: string): Promise<an
 
 // Deletar instância
 export async function deleteEvolutionInstance(instanceName: string): Promise<any> {
-  const res = await fetch(`/api/evolution/instance/delete/${encodeURIComponent(instanceName)}`, {
+  const res = await evolutionFetch(`/instance/delete/${encodeURIComponent(instanceName)}`, {
     method: 'DELETE',
   });
   if (!res.ok) {

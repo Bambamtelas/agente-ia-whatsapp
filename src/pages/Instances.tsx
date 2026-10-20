@@ -331,8 +331,13 @@ const Instances: React.FC = () => {
       setRawInstances(instResult.raw);
       setAgents(agentsResult.agents);
 
-      const map: Record<string, string> = {};
-      if (Array.isArray(linksRes)) {
+      let map: Record<string, string> = {};
+      try {
+        const stored = localStorage.getItem('responder_linked_map');
+        if (stored) map = JSON.parse(stored);
+      } catch {}
+
+      if (Array.isArray(linksRes) && linksRes.length > 0) {
         linksRes.forEach((item: LinkedConfig) => {
           map[item.instanceName] = item.agentId;
         });
@@ -357,16 +362,16 @@ const Instances: React.FC = () => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ instanceName }),
-        });
-        setLinkedMap(prev => {
-          const next = { ...prev };
-          delete next[instanceName];
-          return next;
-        });
-        toast.success(`Atendimento com IA desvinculado de "${instanceName}".`);
-      } catch {
-        toast.error('Erro ao desvincular agente.');
-      }
+        }).catch(() => {});
+      } catch {}
+
+      setLinkedMap(prev => {
+        const next = { ...prev };
+        delete next[instanceName];
+        try { localStorage.setItem('responder_linked_map', JSON.stringify(next)); } catch {}
+        return next;
+      });
+      toast.success(`Atendimento com IA desvinculado de "${instanceName}".`);
       return;
     }
 
@@ -387,13 +392,15 @@ const Instances: React.FC = () => {
           mediaCatalog: agent.media_catalog || [],
           enabled: true,
         }),
-      });
+      }).catch(() => {});
+    } catch {}
 
-      setLinkedMap(prev => ({ ...prev, [instanceName]: agentId }));
-      toast.success(`🤖 Agente "${agent.name}" ativado para responder o WhatsApp desta instância!`);
-    } catch {
-      toast.error('Erro ao vincular agente.');
-    }
+    setLinkedMap(prev => {
+      const next = { ...prev, [instanceName]: agentId };
+      try { localStorage.setItem('responder_linked_map', JSON.stringify(next)); } catch {}
+      return next;
+    });
+    toast.success(`🤖 Agente "${agent.name}" ativado para responder o WhatsApp desta instância!`);
   };
 
   const handleRestart = async (name: string) => {
