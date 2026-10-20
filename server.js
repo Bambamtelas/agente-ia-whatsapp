@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { autoResponder } from './src/server/autoResponder.ts';
+import { humanPauseManager } from './src/server/humanPauseManager.ts';
 
 // Carrega variáveis do arquivo .env se existir localmente
 const envPath = path.resolve(process.cwd(), '.env');
@@ -218,7 +219,62 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ error: 'Endpoint não encontrado' }));
   }
 
-  // 4. Proxy da Evolution API (/api/evolution/*)
+  // 4. Rotas de Pausa por Atendimento Humano (/api/pauses/*)
+  if (pathname.startsWith('/api/pauses')) {
+    res.setHeader('Content-Type', 'application/json');
+
+    // Listar todas as pausas
+    if ((pathname === '/api/pauses' || pathname === '/api/pauses/') && req.method === 'GET') {
+      return res.end(JSON.stringify(humanPauseManager.getAllActivePauses()));
+    }
+
+    // Verificar pausa de contato específico (/api/pauses/:instanceName/:phone)
+    const pauseMatch = pathname.match(/^\/api\/pauses\/([^/?]+)\/([^/?]+)/);
+    if (pauseMatch && req.method === 'GET') {
+      const inst = pauseMatch[1];
+      const ph = pauseMatch[2];
+      const isPaused = humanPauseManager.isPaused(inst, ph);
+      const record = humanPauseManager.getPause(inst, ph);
+      return res.end(JSON.stringify({ isPaused, record }));
+    }
+
+    if (req.method === 'POST') {
+      try {
+        const body = await parseBody(req);
+        if (pathname === '/api/pauses/set') {
+          const rec = humanPauseManager.setPause(body.instanceName, body.phone, body.lastHumanMessage, body.durationMs);
+          return res.end(JSON.stringify({ success: true, record: rec }));
+        }
+        if (pathname === '/api/pauses/clear') {
+          const ok = humanPauseManager.clearPause(body.instanceName, body.phone);
+          return res.end(JSON.stringify({ success: true, cleared: ok }));
+        }
+      } catch (err) {
+        res.statusCode = 500;
+        return res.end(JSON.stringify({ error: err.message }));
+      }
+    }
+
+    res.statusCode = 404;
+    return res.end(JSON.stringify({ error: 'Endpoint de pausa não encontrado' }));
+  }
+
+  // 5. Webhook da Evolution API (/webhook/whatsapp ou /api/webhook)
+  if ((pathname === '/webhook/whatsapp' || pathname === '/api/webhook' || pathname === '/webhook') && req.method === 'POST') {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const body = await parseBody(req);
+      if (typeof autoResponder.handleWebhook === 'function') {
+        autoResponder.handleWebhook(body);
+      }
+      return res.end(JSON.stringify({ success: true, received: true }));
+    } catch (err) {
+      res.statusCode = 500;
+      return res.end(JSON.stringify({ error: err.message }));
+    }
+  }
+
+  // 5. Proxy da Evolution API (/api/evolution/*)
   if (pathname.startsWith('/api/evolution/')) {
     const apiUrl = (process.env.EVOLUTION_API_URL || 'https://api.doratec.site').replace(/\/$/, '');
     const apiKey = process.env.EVOLUTION_API_KEY || '';

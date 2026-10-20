@@ -24,4 +24,8 @@ Thumbs.db
 # Bot runtime temporários
 .responder.lock
 .responder-seen.json
+.human-pauses.json
+.ai-sent-ids.json
+scratch/
+
 

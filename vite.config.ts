@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { autoResponder } from './src/server/autoResponder.ts';
+import { humanPauseManager } from './src/server/humanPauseManager.ts';
 
 function evolutionApiPlugin(): Plugin {
   return {
@@ -185,6 +186,65 @@ function evolutionApiPlugin(): Plugin {
           }
 
           return next();
+        }
+
+        // Rotas de Pausa por Atendimento Humano
+        if (req.url?.startsWith('/api/pauses')) {
+          res.setHeader('Content-Type', 'application/json');
+
+          if ((req.url === '/api/pauses' || req.url === '/api/pauses/') && req.method === 'GET') {
+            return res.end(JSON.stringify(humanPauseManager.getAllActivePauses()));
+          }
+
+          const pauseMatch = req.url.match(/^\/api\/pauses\/([^/?]+)\/([^/?]+)/);
+          if (pauseMatch && req.method === 'GET') {
+            const inst = pauseMatch[1];
+            const ph = pauseMatch[2];
+            const isPaused = humanPauseManager.isPaused(inst, ph);
+            const record = humanPauseManager.getPause(inst, ph);
+            return res.end(JSON.stringify({ isPaused, record }));
+          }
+
+          if (req.method === 'POST') {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) {
+              chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+            }
+            const bodyStr = Buffer.concat(chunks).toString('utf-8');
+            const body = bodyStr ? JSON.parse(bodyStr) : {};
+
+            if (req.url === '/api/pauses/set') {
+              const rec = humanPauseManager.setPause(body.instanceName, body.phone, body.lastHumanMessage, body.durationMs);
+              return res.end(JSON.stringify({ success: true, record: rec }));
+            }
+
+            if (req.url === '/api/pauses/clear') {
+              const ok = humanPauseManager.clearPause(body.instanceName, body.phone);
+              return res.end(JSON.stringify({ success: true, cleared: ok }));
+            }
+          }
+
+          return next();
+        }
+
+        // Webhook da Evolution API (/webhook/whatsapp ou /api/webhook)
+        if ((req.url === '/webhook/whatsapp' || req.url === '/api/webhook' || req.url === '/webhook') && req.method === 'POST') {
+          res.setHeader('Content-Type', 'application/json');
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) {
+              chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+            }
+            const bodyStr = Buffer.concat(chunks).toString('utf-8');
+            const body = bodyStr ? JSON.parse(bodyStr) : {};
+            if (typeof autoResponder.handleWebhook === 'function') {
+              autoResponder.handleWebhook(body);
+            }
+            return res.end(JSON.stringify({ success: true, received: true }));
+          } catch (err: any) {
+            res.statusCode = 500;
+            return res.end(JSON.stringify({ error: err.message }));
+          }
         }
 
         // Proxy da Evolution API

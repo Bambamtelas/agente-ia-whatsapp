@@ -69,5 +69,15 @@ export default async function handler(req, res) {
     return res.status(200).json({ success: true, catalog: [] });
   }
 
+  // 5. Pausas de Atendimento Humano (/api/pauses/*)
+  if (section === 'pauses') {
+    return res.status(200).json({ success: true, pauses: [] });
+  }
+
+  // 6. Webhook (/api/webhook)
+  if (section === 'webhook') {
+    return res.status(200).json({ success: true, received: true });
+  }
+
   return res.status(404).json({ error: `Rota de API não encontrada: /api/${pathList.join('/')}` });
 }

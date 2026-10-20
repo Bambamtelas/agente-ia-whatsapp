@@ -1,6 +1,7 @@
 import { generateAIResponse } from './aiEngine.ts';
 import fs from 'node:fs';
 import path from 'node:path';
+import { humanPauseManager, normalizePhone } from './humanPauseManager.ts';
 
 declare const process: any;
 declare const globalThis: any;
@@ -402,6 +403,11 @@ class AutoResponderService {
   private async closeChatDueToInactivity(targetPhone: string, link: LinkedAgentConfig, senderName: string) {
     if (this.closedChats.has(targetPhone)) return;
 
+    // Se o contato está com atendimento humano ativo, não envia encerramento automático
+    if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+      return;
+    }
+
     if (this.chatCloseTimers.has(targetPhone)) {
       clearTimeout(this.chatCloseTimers.get(targetPhone));
       this.chatCloseTimers.delete(targetPhone);
@@ -433,6 +439,9 @@ class AutoResponderService {
       });
 
       if (res.ok) {
+        const fareData: any = await res.json().catch(() => ({}));
+        const fareId = fareData?.key?.id || fareData?.id;
+        humanPauseManager.registerAiSentMessage(fareId, link.instanceName, targetPhone);
         console.log(`[AutoResponder] ✅ Atendimento encerrado com mensagem de despedida enviada para +${targetPhone}`);
       }
 
@@ -475,105 +484,248 @@ class AutoResponderService {
       if (!messages.length) return;
 
       for (const msg of messages) {
-        const msgId = msg.id || '';
-        const keyId = msg.key?.id || '';
-        const fromMe = msg.key?.fromMe;
-        const msgTimestamp = Number(msg.messageTimestamp) || 0;
-
-        if (fromMe) continue;
-
-        const remoteJid = msg.key?.remoteJid || '';
-        if (remoteJid.includes('@broadcast') || remoteJid.includes('@g.us')) {
-          if (msgId) this.seenMessageIds.add(msgId);
-          if (keyId) this.seenMessageIds.add(keyId);
-          continue;
-        }
-
-        let targetPhone = msg.key?.remoteJidAlt || msg.key?.remoteJid || '';
-        targetPhone = targetPhone.replace('@s.whatsapp.net', '').replace('@lid', '').trim();
-        if (!targetPhone) continue;
-
-        if ((msgId && this.seenMessageIds.has(msgId)) || (keyId && this.seenMessageIds.has(keyId))) {
-          continue;
-        }
-
-        const lastTs = this.lastChatTimestamps.get(targetPhone) || 0;
-        if (msgTimestamp > 0 && msgTimestamp <= lastTs) {
-          if (msgId) this.seenMessageIds.add(msgId);
-          if (keyId) this.seenMessageIds.add(keyId);
-          continue;
-        }
-
-        const textContent = (
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          ''
-        ).trim();
-
-        if (!textContent) {
-          if (msgId) this.seenMessageIds.add(msgId);
-          if (keyId) this.seenMessageIds.add(keyId);
-          continue;
-        }
-
-        // Marca imediatamente como visto para não repetir em novos polls
-        if (msgId) this.seenMessageIds.add(msgId);
-        if (keyId) this.seenMessageIds.add(keyId);
-        if (msgTimestamp > lastTs) {
-          this.lastChatTimestamps.set(targetPhone, msgTimestamp);
-        }
-        this.saveSeenToDisk();
-
-        // Cancela qualquer timer de encerramento pendente para este contato
-        if (this.chatCloseTimers.has(targetPhone)) {
-          clearTimeout(this.chatCloseTimers.get(targetPhone));
-          this.chatCloseTimers.delete(targetPhone);
-        }
-
-        const wasClosed = this.closedChats.has(targetPhone);
-        if (wasClosed) {
-          console.log(`[AutoResponder] 🔄 Cliente +${targetPhone} iniciou nova conversa após encerramento anterior.`);
-          this.closedChats.delete(targetPhone);
-        }
-
-        // Atualiza rastreamento de atividade da conversa
-        this.lastInteractionTimestamps.set(targetPhone, Date.now());
-        this.chatLastActiveLink.set(targetPhone, link);
-        this.chatSenderNames.set(targetPhone, msg.pushName || 'Cliente');
-
-        // Extrai histórico recente da conversa (se estava encerrada, começa do zero sem misturar contexto velho)
-        const conversationHistory: Array<{ role: 'user' | 'assistant'; text: string }> = [];
-        if (!wasClosed) {
-          const recentMessages = messages
-            .filter(m => {
-              const p = (m.key?.remoteJidAlt || m.key?.remoteJid || '').replace('@s.whatsapp.net', '').replace('@lid', '').trim();
-              return p === targetPhone && m.id !== msgId && m.key?.id !== keyId;
-            })
-            .sort((a, b) => (a.messageTimestamp || 0) - (b.messageTimestamp || 0))
-            .slice(-10);
-
-          for (const rm of recentMessages) {
-            const rmText = rm.message?.conversation || rm.message?.extendedTextMessage?.text;
-            if (rmText && rmText.trim()) {
-              conversationHistory.push({
-                role: rm.key?.fromMe ? 'assistant' : 'user',
-                text: rmText.trim(),
-              });
-            }
-          }
-        }
-
-        // Envia para o buffer de debounce do contato
-        this.bufferIncomingMessage(
-          targetPhone,
-          msg.pushName || 'Cliente',
-          { id: msgId, keyId, text: textContent, timestamp: msgTimestamp },
-          link,
-          conversationHistory
-        );
+        await this.processSingleMessage(msg, link, messages);
       }
     } catch (err: any) {
       console.error(`[AutoResponder] Falha ao verificar mensagens de ${link.instanceName}:`, err.message);
+    }
+  }
+
+  /**
+   * Processa uma única mensagem recebida via Polling ou Webhook da Evolution API
+   */
+  public async processSingleMessage(
+    msg: any,
+    link?: LinkedAgentConfig,
+    contextMessages?: any[],
+    explicitInstanceName?: string
+  ) {
+    if (!msg || !msg.key) return;
+
+    const msgId = msg.id || '';
+    const keyId = msg.key?.id || '';
+    const fromMe = Boolean(msg.key?.fromMe);
+    const msgTimestamp = Number(msg.messageTimestamp) || 0;
+
+    const remoteJid = msg.key?.remoteJid || '';
+    if (remoteJid.includes('@broadcast') || remoteJid.includes('@g.us')) {
+      if (msgId) this.seenMessageIds.add(msgId);
+      if (keyId) this.seenMessageIds.add(keyId);
+      return;
+    }
+
+    let targetPhone = msg.key?.remoteJidAlt || msg.key?.remoteJid || '';
+    targetPhone = normalizePhone(targetPhone);
+    if (!targetPhone) return;
+
+    if ((msgId && this.seenMessageIds.has(msgId)) || (keyId && this.seenMessageIds.has(keyId))) {
+      return;
+    }
+
+    const instanceName = link?.instanceName || explicitInstanceName || '';
+
+    // =========================================================================
+    // 1. DETECÇÃO DE MENSAGEM MANUAL DO OPERADOR HUMANO (fromMe: true)
+    // =========================================================================
+    if (fromMe) {
+      if (msgId) this.seenMessageIds.add(msgId);
+      if (keyId) this.seenMessageIds.add(keyId);
+      this.saveSeenToDisk();
+
+      // Verifica se essa mensagem enviada foi disparada pela própria IA
+      const isAi = humanPauseManager.isAiSentMessage(msgId || keyId, instanceName, targetPhone, msgTimestamp * 1000);
+      if (isAi) {
+        // Mensagem da própria IA: ignora sem pausar
+        return;
+      }
+
+      // Mensagem enviada MANUALMENTE pelo proprietário/atendente no WhatsApp!
+      const textContent = (
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        ''
+      ).trim();
+
+      // Ativa ou reinicia a pausa de 20 minutos para este contato
+      const pauseRecord = humanPauseManager.setPause(instanceName, targetPhone, textContent);
+
+      // Cancela qualquer resposta da IA que estava no buffer de espera
+      const pendingBuffer = this.debounceBuffers.get(targetPhone);
+      if (pendingBuffer?.timer) {
+        clearTimeout(pendingBuffer.timer);
+      }
+      this.debounceBuffers.delete(targetPhone);
+
+      // Cancela qualquer timer de encerramento por inatividade
+      if (this.chatCloseTimers.has(targetPhone)) {
+        clearTimeout(this.chatCloseTimers.get(targetPhone));
+        this.chatCloseTimers.delete(targetPhone);
+      }
+
+      console.log(`[HumanPause] 👤 Mensagem manual detectada na instância "${instanceName}" para +${targetPhone}. IA pausada por 20 minutos (retomada: ${new Date(pauseRecord.expiresAt).toLocaleTimeString()}).`);
+
+      this.activityLogs.push({
+        id: Math.random().toString(36).substring(2),
+        timestamp: new Date().toISOString(),
+        instanceName,
+        agentName: link?.agentName || 'Operador',
+        senderPhone: targetPhone,
+        senderName: 'Operador Humano',
+        userMessage: textContent || '[Mensagem manual]',
+        aiResponse: `Atendimento humano iniciado. IA pausada por 20 minutos para este contato (retomada prevista: ${new Date(pauseRecord.expiresAt).toLocaleTimeString()}).`,
+        status: 'success',
+      });
+
+      return;
+    }
+
+    // =========================================================================
+    // 2. MENSAGEM RECEBIDA DO CLIENTE (fromMe: false)
+    // =========================================================================
+    if (!link) return;
+
+    // Verifica se o contato está com IA pausada por atendimento humano
+    if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+      const pause = humanPauseManager.getPause(link.instanceName, targetPhone);
+      const textContent = (
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        ''
+      ).trim();
+
+      if (msgId) this.seenMessageIds.add(msgId);
+      if (keyId) this.seenMessageIds.add(keyId);
+      this.saveSeenToDisk();
+
+      console.log(`[HumanPause] ⏸️ Mensagem de +${targetPhone} registrada, mas IA está pausada para atendimento humano até ${pause?.expiresAt}. Nenhuma resposta da IA será enviada.`);
+
+      this.activityLogs.push({
+        id: Math.random().toString(36).substring(2),
+        timestamp: new Date().toISOString(),
+        instanceName: link.instanceName,
+        agentName: link.agentName,
+        senderPhone: targetPhone,
+        senderName: msg.pushName || 'Cliente',
+        userMessage: textContent || '[Mensagem recebida]',
+        aiResponse: `[IA Pausada - Atendimento Humano ativo até ${pause ? new Date(pause.expiresAt).toLocaleTimeString() : '20 min'}]`,
+        status: 'success',
+      });
+
+      return;
+    }
+
+    const lastTs = this.lastChatTimestamps.get(targetPhone) || 0;
+    if (msgTimestamp > 0 && msgTimestamp <= lastTs) {
+      if (msgId) this.seenMessageIds.add(msgId);
+      if (keyId) this.seenMessageIds.add(keyId);
+      return;
+    }
+
+    const textContent = (
+      msg.message?.conversation ||
+      msg.message?.extendedTextMessage?.text ||
+      ''
+    ).trim();
+
+    if (!textContent) {
+      if (msgId) this.seenMessageIds.add(msgId);
+      if (keyId) this.seenMessageIds.add(keyId);
+      return;
+    }
+
+    // Marca imediatamente como visto para não repetir em novos polls
+    if (msgId) this.seenMessageIds.add(msgId);
+    if (keyId) this.seenMessageIds.add(keyId);
+    if (msgTimestamp > lastTs) {
+      this.lastChatTimestamps.set(targetPhone, msgTimestamp);
+    }
+    this.saveSeenToDisk();
+
+    // Cancela qualquer timer de encerramento pendente para este contato
+    if (this.chatCloseTimers.has(targetPhone)) {
+      clearTimeout(this.chatCloseTimers.get(targetPhone));
+      this.chatCloseTimers.delete(targetPhone);
+    }
+
+    const wasClosed = this.closedChats.has(targetPhone);
+    if (wasClosed) {
+      console.log(`[AutoResponder] 🔄 Cliente +${targetPhone} iniciou nova conversa após encerramento anterior.`);
+      this.closedChats.delete(targetPhone);
+    }
+
+    // Atualiza rastreamento de atividade da conversa
+    this.lastInteractionTimestamps.set(targetPhone, Date.now());
+    this.chatLastActiveLink.set(targetPhone, link);
+    this.chatSenderNames.set(targetPhone, msg.pushName || 'Cliente');
+
+    // Extrai histórico recente da conversa (se estava encerrada, começa do zero sem misturar contexto velho)
+    const conversationHistory: Array<{ role: 'user' | 'assistant'; text: string }> = [];
+    if (!wasClosed && contextMessages && contextMessages.length > 0) {
+      const recentMessages = contextMessages
+        .filter(m => {
+          const p = normalizePhone(m.key?.remoteJidAlt || m.key?.remoteJid || '');
+          return p === targetPhone && m.id !== msgId && m.key?.id !== keyId;
+        })
+        .sort((a, b) => (a.messageTimestamp || 0) - (b.messageTimestamp || 0))
+        .slice(-10);
+
+      for (const rm of recentMessages) {
+        const rmText = rm.message?.conversation || rm.message?.extendedTextMessage?.text;
+        if (rmText && rmText.trim()) {
+          conversationHistory.push({
+            role: rm.key?.fromMe ? 'assistant' : 'user',
+            text: rmText.trim(),
+          });
+        }
+      }
+    }
+
+    // Envia para o buffer de debounce do contato
+    this.bufferIncomingMessage(
+      targetPhone,
+      msg.pushName || 'Cliente',
+      { id: msgId, keyId, text: textContent, timestamp: msgTimestamp },
+      link,
+      conversationHistory
+    );
+  }
+
+  /**
+   * Processa Webhooks recebidos da Evolution API (messages.upsert, etc.)
+   */
+  public async handleWebhook(payload: any) {
+    if (!payload) return;
+    const instanceName = (
+      payload.instance ||
+      payload.instanceName ||
+      payload.data?.instance ||
+      ''
+    ).trim();
+
+    let link = this.links.get(instanceName);
+    if (!link && instanceName) {
+      for (const [name, l] of this.links.entries()) {
+        if (name.toLowerCase() === instanceName.toLowerCase()) {
+          link = l;
+          break;
+        }
+      }
+    }
+
+    const rawData = payload.data || payload;
+    let msgs: any[] = [];
+    if (Array.isArray(rawData)) {
+      msgs = rawData;
+    } else if (rawData?.messages?.records && Array.isArray(rawData.messages.records)) {
+      msgs = rawData.messages.records;
+    } else if (rawData?.messages && Array.isArray(rawData.messages)) {
+      msgs = rawData.messages;
+    } else if (rawData?.key) {
+      msgs = [rawData];
+    }
+
+    for (const msg of msgs) {
+      await this.processSingleMessage(msg, link, msgs, instanceName);
     }
   }
 
@@ -617,6 +769,12 @@ class AutoResponderService {
 
     this.debounceBuffers.delete(targetPhone);
 
+    // Verificação de segurança: se o operador humano iniciou atendimento durante o debounce, descarta!
+    if (humanPauseManager.isPaused(buffer.link.instanceName, targetPhone)) {
+      console.log(`[HumanPause] 🛑 Buffer descartado para +${targetPhone}: atendimento humano ativo.`);
+      return;
+    }
+
     if (this.processingChats.has(targetPhone)) {
       console.log(`[AutoResponder] ⏳ Chat +${targetPhone} já ocupado gerando resposta. Reagendando envio...`);
       setTimeout(() => this.bufferIncomingMessage(targetPhone, buffer.senderName, buffer.messages[0], buffer.link, buffer.conversationHistory), 2000);
@@ -640,6 +798,12 @@ class AutoResponderService {
     userMessage: string,
     conversationHistory: Array<{ role: 'user' | 'assistant'; text: string }>
   ) {
+    // Verificação pré-geração: se a IA foi pausada, não gera resposta
+    if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+      console.log(`[HumanPause] 🛑 Geração abortada para +${targetPhone}: atendimento humano ativo.`);
+      return;
+    }
+
     this.processingChats.add(targetPhone);
     console.log(`[AutoResponder] 🤖 Gerando resposta única para +${targetPhone} (${senderName}): "${userMessage}"`);
 
@@ -677,6 +841,13 @@ class AutoResponderService {
           groq: groqKey,
         },
       });
+
+      // VERIFICAÇÃO CRÍTICA PÓS-GERAÇÃO:
+      // Se durante a geração o operador humano mandou mensagem manual, descarta a resposta imediatamente!
+      if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+        console.log(`[HumanPause] 🛑 Resposta da IA descartada para +${targetPhone}: atendimento humano foi ativado durante a geração!`);
+        return;
+      }
 
       // Extrai tags de imagens solicitadas: [ENVIAR_IMAGEM: id_ou_titulo] ou [ENVIAR_FOTO: ...]
       const mediaTagRegex = /\[(?:ENVIAR_IMAGEM|ENVIAR_FOTO):\s*([^\]]+)\]/gi;
@@ -726,6 +897,12 @@ class AutoResponderService {
           const chunk = textChunks[i];
           if (!chunk) continue;
 
+          // Verificação pré-envio de cada balão de mensagem
+          if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+            console.log(`[HumanPause] 🛑 Envio de mensagens interrompido para +${targetPhone}: atendimento humano ativado.`);
+            break;
+          }
+
           // Simula tempo de digitação humano (entre 1.2s e 2.8s)
           const typingDelay = Math.min(Math.max(chunk.length * 25, 1200), 2800);
 
@@ -763,6 +940,10 @@ class AutoResponderService {
             const sendErr: any = await sendRes.json().catch(() => ({}));
             console.warn(`[AutoResponder] Falha no envio do balão ${i + 1}:`, sendErr.message || sendRes.statusText);
           } else {
+            const sendData: any = await sendRes.json().catch(() => ({}));
+            const sentId = sendData?.key?.id || sendData?.id;
+            // Registra que este ID é da própria IA para não disparar pausa humana
+            humanPauseManager.registerAiSentMessage(sentId, link.instanceName, targetPhone);
             console.log(`[AutoResponder] ✅ Mensagem ${i + 1}/${textChunks.length} enviada para +${targetPhone}`);
           }
 
@@ -775,9 +956,19 @@ class AutoResponderService {
 
       // 2. Se a IA disparou imagens do catálogo, envia com pausa natural
       if (requestedMediaKeys.length > 0 && link.mediaCatalog && link.mediaCatalog.length > 0) {
+        if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+          console.log(`[HumanPause] 🛑 Envio de mídias abortado para +${targetPhone}: atendimento humano ativo.`);
+          return;
+        }
+
         await new Promise(resolve => setTimeout(resolve, 1500));
 
         for (const rawKey of requestedMediaKeys) {
+          if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+            console.log(`[HumanPause] 🛑 Envio de mídias interrompido para +${targetPhone}: atendimento humano ativo.`);
+            return;
+          }
+
           const key = rawKey.toLowerCase();
           const matchedItem = link.mediaCatalog.find(
             m => m.id.toLowerCase() === key || m.title.toLowerCase() === key || m.title.toLowerCase().includes(key)
@@ -834,6 +1025,9 @@ class AutoResponderService {
             });
 
             if (mediaRes.ok) {
+              const mediaData: any = await mediaRes.json().catch(() => ({}));
+              const mediaId = mediaData?.key?.id || mediaData?.id;
+              humanPauseManager.registerAiSentMessage(mediaId, link.instanceName, targetPhone);
               console.log(`[AutoResponder] ✅ Imagem "${matchedItem.title}" enviada com sucesso para +${targetPhone}!`);
             } else {
               const mediaErr: any = await mediaRes.json().catch(() => ({}));
@@ -860,6 +1054,23 @@ class AutoResponderService {
     } finally {
       this.processingChats.delete(targetPhone);
     }
+  }
+
+  // Métodos de Pausa por Atendimento Humano
+  public getPauses() {
+    return humanPauseManager.getAllActivePauses();
+  }
+  public getPause(instanceName: string, phone: string) {
+    return humanPauseManager.getPause(instanceName, phone);
+  }
+  public isContactPaused(instanceName: string, phone: string) {
+    return humanPauseManager.isPaused(instanceName, phone);
+  }
+  public setHumanPause(instanceName: string, phone: string, lastHumanMessage?: string, durationMs?: number) {
+    return humanPauseManager.setPause(instanceName, phone, lastHumanMessage, durationMs);
+  }
+  public clearHumanPause(instanceName: string, phone: string) {
+    return humanPauseManager.clearPause(instanceName, phone);
   }
 }
 
