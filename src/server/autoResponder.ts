@@ -198,6 +198,12 @@ class AutoResponderService {
   private debounceBuffers: Map<string, ChatDebounceBuffer> = new Map();
   private activityLogs: ActivityLog[] = [];
   private isPolling = false;
+  private lastInteractionTimestamps: Map<string, number> = new Map();
+  private chatLastActiveLink: Map<string, LinkedAgentConfig> = new Map();
+  private chatSenderNames: Map<string, string> = new Map();
+  private closedChats: Set<string> = new Set();
+  private chatCloseTimers: Map<string, any> = new Map();
+  private readonly INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutos sem conversa
 
   constructor() {
     this.loadLinksFromDisk();
@@ -355,10 +361,94 @@ class AutoResponderService {
       for (const link of activeLinks) {
         await this.pollInstanceMessages(link);
       }
+
+      // Verifica encerramento de conversas inativas há mais de 20 minutos
+      await this.checkInactivityTimeouts();
     } catch (err: any) {
       console.error('[AutoResponder Error]', err?.message || err);
     } finally {
       this.isPolling = false;
+    }
+  }
+
+  // Verifica periodicamente se algum contato ficou 20 minutos sem resposta
+  private async checkInactivityTimeouts() {
+    const now = Date.now();
+    for (const [phone, lastTime] of this.lastInteractionTimestamps.entries()) {
+      if (!this.closedChats.has(phone) && (now - lastTime >= this.INACTIVITY_TIMEOUT_MS)) {
+        const link = this.chatLastActiveLink.get(phone);
+        const sender = this.chatSenderNames.get(phone) || 'Cliente';
+        if (link) {
+          await this.closeChatDueToInactivity(phone, link, sender);
+        }
+      }
+    }
+  }
+
+  // Agenda encerramento após 20 minutos sem mensagem do cliente
+  private scheduleInactivityClose(targetPhone: string, link: LinkedAgentConfig, senderName: string) {
+    if (this.chatCloseTimers.has(targetPhone)) {
+      clearTimeout(this.chatCloseTimers.get(targetPhone));
+    }
+
+    const timer = setTimeout(async () => {
+      await this.closeChatDueToInactivity(targetPhone, link, senderName);
+    }, this.INACTIVITY_TIMEOUT_MS);
+
+    this.chatCloseTimers.set(targetPhone, timer);
+  }
+
+  // Executa o encerramento da conversa por inatividade
+  private async closeChatDueToInactivity(targetPhone: string, link: LinkedAgentConfig, senderName: string) {
+    if (this.closedChats.has(targetPhone)) return;
+
+    if (this.chatCloseTimers.has(targetPhone)) {
+      clearTimeout(this.chatCloseTimers.get(targetPhone));
+      this.chatCloseTimers.delete(targetPhone);
+    }
+
+    this.closedChats.add(targetPhone);
+    console.log(`[AutoResponder] ⏱️ 20 minutos sem interação com +${targetPhone} (${senderName}). Encerrando atendimento...`);
+
+    const apiUrl = getEnvKey('EVOLUTION_API_URL').replace(/\/$/, '') || 'https://api.doratec.site';
+    const apiKey = getEnvKey('EVOLUTION_API_KEY');
+
+    const farewellMessage = `Olá, ${senderName}! Como não tivemos retorno por aqui nos últimos 20 minutos, estou encerrando este atendimento.\n\nCaso precise de qualquer informação ou queira continuar, basta me enviar uma nova mensagem a qualquer momento! Tenha um ótimo dia! 👋`;
+
+    try {
+      // 1. Simula presença "digitando..."
+      await fetch(`${apiUrl}/chat/sendPresence/${encodeURIComponent(link.instanceName)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+        body: JSON.stringify({ number: targetPhone, presence: 'composing', delay: 1800 }),
+      }).catch(() => {});
+
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      // 2. Envia balão de encerramento amigável
+      const res = await fetch(`${apiUrl}/message/sendText/${encodeURIComponent(link.instanceName)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+        body: JSON.stringify({ number: targetPhone, text: farewellMessage }),
+      });
+
+      if (res.ok) {
+        console.log(`[AutoResponder] ✅ Atendimento encerrado com mensagem de despedida enviada para +${targetPhone}`);
+      }
+
+      this.activityLogs.push({
+        id: Math.random().toString(36).substring(2),
+        timestamp: new Date().toISOString(),
+        instanceName: link.instanceName,
+        agentName: link.agentName,
+        senderPhone: targetPhone,
+        senderName,
+        userMessage: '[Inatividade de 20 minutos]',
+        aiResponse: farewellMessage,
+        status: 'success',
+      });
+    } catch (err: any) {
+      console.error(`[AutoResponder] Falha ao enviar encerramento para +${targetPhone}:`, err.message);
     }
   }
 
@@ -434,23 +524,42 @@ class AutoResponderService {
         }
         this.saveSeenToDisk();
 
-        // Extrai histórico recente da conversa
-        const conversationHistory: Array<{ role: 'user' | 'assistant'; text: string }> = [];
-        const recentMessages = messages
-          .filter(m => {
-            const p = (m.key?.remoteJidAlt || m.key?.remoteJid || '').replace('@s.whatsapp.net', '').replace('@lid', '').trim();
-            return p === targetPhone && m.id !== msgId && m.key?.id !== keyId;
-          })
-          .sort((a, b) => (a.messageTimestamp || 0) - (b.messageTimestamp || 0))
-          .slice(-10);
+        // Cancela qualquer timer de encerramento pendente para este contato
+        if (this.chatCloseTimers.has(targetPhone)) {
+          clearTimeout(this.chatCloseTimers.get(targetPhone));
+          this.chatCloseTimers.delete(targetPhone);
+        }
 
-        for (const rm of recentMessages) {
-          const rmText = rm.message?.conversation || rm.message?.extendedTextMessage?.text;
-          if (rmText && rmText.trim()) {
-            conversationHistory.push({
-              role: rm.key?.fromMe ? 'assistant' : 'user',
-              text: rmText.trim(),
-            });
+        const wasClosed = this.closedChats.has(targetPhone);
+        if (wasClosed) {
+          console.log(`[AutoResponder] 🔄 Cliente +${targetPhone} iniciou nova conversa após encerramento anterior.`);
+          this.closedChats.delete(targetPhone);
+        }
+
+        // Atualiza rastreamento de atividade da conversa
+        this.lastInteractionTimestamps.set(targetPhone, Date.now());
+        this.chatLastActiveLink.set(targetPhone, link);
+        this.chatSenderNames.set(targetPhone, msg.pushName || 'Cliente');
+
+        // Extrai histórico recente da conversa (se estava encerrada, começa do zero sem misturar contexto velho)
+        const conversationHistory: Array<{ role: 'user' | 'assistant'; text: string }> = [];
+        if (!wasClosed) {
+          const recentMessages = messages
+            .filter(m => {
+              const p = (m.key?.remoteJidAlt || m.key?.remoteJid || '').replace('@s.whatsapp.net', '').replace('@lid', '').trim();
+              return p === targetPhone && m.id !== msgId && m.key?.id !== keyId;
+            })
+            .sort((a, b) => (a.messageTimestamp || 0) - (b.messageTimestamp || 0))
+            .slice(-10);
+
+          for (const rm of recentMessages) {
+            const rmText = rm.message?.conversation || rm.message?.extendedTextMessage?.text;
+            if (rmText && rmText.trim()) {
+              conversationHistory.push({
+                role: rm.key?.fromMe ? 'assistant' : 'user',
+                text: rmText.trim(),
+              });
+            }
           }
         }
 
@@ -737,6 +846,12 @@ class AutoResponderService {
       }
 
       this.activityLogs.push(logEntry);
+
+      // Agenda encerramento automático por inatividade de 20 minutos
+      this.lastInteractionTimestamps.set(targetPhone, Date.now());
+      this.chatLastActiveLink.set(targetPhone, link);
+      this.chatSenderNames.set(targetPhone, senderName);
+      this.scheduleInactivityClose(targetPhone, link, senderName);
     } catch (err: any) {
       console.error(`[AutoResponder] ❌ Erro ao atender +${targetPhone}:`, err.message);
       logEntry.status = 'error';
