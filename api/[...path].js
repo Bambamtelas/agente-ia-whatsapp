@@ -1,3 +1,5 @@
+import webhookHandler from './webhook.js';
+
 export default async function handler(req, res) {
   // Configura CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -11,6 +13,11 @@ export default async function handler(req, res) {
   const { path: pathSegments = [] } = req.query;
   const pathList = Array.isArray(pathSegments) ? pathSegments : [pathSegments];
   const section = pathList[0] || '';
+
+  // 1. Webhook da Evolution API (/api/webhook)
+  if (section === 'webhook' || req.url?.includes('/webhook')) {
+    return webhookHandler(req, res);
+  }
 
   // 1. Proxy para Evolution API (/api/evolution/*)
   if (section === 'evolution') {

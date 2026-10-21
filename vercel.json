@@ -4,6 +4,14 @@
   "framework": "vite",
   "rewrites": [
     {
+      "source": "/webhook/whatsapp",
+      "destination": "/api/webhook"
+    },
+    {
+      "source": "/webhook",
+      "destination": "/api/webhook"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
