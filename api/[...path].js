@@ -10,8 +10,12 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  const { path: pathSegments = [] } = req.query;
-  const pathList = Array.isArray(pathSegments) ? pathSegments : [pathSegments];
+  const urlObj = new URL(req.url || '/', `https://${req.headers.host || 'localhost'}`);
+  const rawPathFromUrl = urlObj.pathname.replace(/^\/api\/?/, '').split('/').filter(Boolean);
+  const querySegments = req.query?.path;
+  const pathList = (Array.isArray(querySegments) && querySegments.length > 0)
+    ? querySegments
+    : (rawPathFromUrl.length > 0 ? rawPathFromUrl : [querySegments].filter(Boolean));
   const section = pathList[0] || '';
 
   // 1. Webhook da Evolution API (/api/webhook)

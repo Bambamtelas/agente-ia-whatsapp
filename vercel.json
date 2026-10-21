@@ -12,6 +12,14 @@
       "destination": "/api/webhook"
     },
     {
+      "source": "/api/webhook",
+      "destination": "/api/webhook"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api/[...path]"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
