@@ -144,3 +144,33 @@ export async function deleteEvolutionInstance(instanceName: string): Promise<any
   }
   return res.json();
 }
+
+// Configurar Webhook na instância Evolution API
+export async function setEvolutionWebhook(instanceName: string, webhookUrl: string): Promise<any> {
+  const res = await evolutionFetch(`/webhook/set/${encodeURIComponent(instanceName)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      webhook: {
+        enabled: true,
+        url: webhookUrl,
+        byEvents: false,
+        base64: false,
+        events: ['MESSAGES_UPSERT', 'SEND_MESSAGE'],
+      },
+    }),
+  });
+  if (!res.ok) {
+    const err: any = await res.json().catch(() => ({}));
+    throw new Error(err.message || err.response?.message || 'Falha ao configurar webhook');
+  }
+  return res.json();
+}
+
+// Consultar Webhook da instância Evolution API
+export async function findEvolutionWebhook(instanceName: string): Promise<any> {
+  const res = await evolutionFetch(`/webhook/find/${encodeURIComponent(instanceName)}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+

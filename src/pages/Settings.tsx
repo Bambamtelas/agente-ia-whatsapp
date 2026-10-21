@@ -14,6 +14,7 @@ import {
   Check,
 } from 'lucide-react';
 import { isSupabaseConfigured } from '../lib/supabase';
+import { fetchEvolutionInstances, setEvolutionWebhook } from '../lib/evolutionService';
 import toast from 'react-hot-toast';
 
 const Section: React.FC<{
@@ -112,14 +113,19 @@ const SecretInput: React.FC<{
 };
 
 const Settings: React.FC = () => {
+  const defaultWebhook = typeof window !== 'undefined'
+    ? `${window.location.origin}/api/webhook`
+    : 'https://agente-ia-whatsapp-ecru.vercel.app/api/webhook';
+
   const [supabase, setSupabase] = useState({ url: '', anon_key: '' });
   const [evolution, setEvolution] = useState({ url: '', global_api_key: '' });
   const [aiKeys, setAiKeys] = useState({ openai: '', gemini: '', anthropic: '', groq: '' });
-  const [webhook, setWebhook] = useState('');
+  const [webhook, setWebhook] = useState(defaultWebhook);
   const [copied, setCopied] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isApplyingWebhook, setIsApplyingWebhook] = useState(false);
 
-  const webhookExample = 'https://api.seudominio.com/webhook/whatsapp';
+  const webhookExample = defaultWebhook;
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -127,11 +133,49 @@ const Settings: React.FC = () => {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleApplyWebhook = async () => {
+    const targetUrl = (webhook || defaultWebhook).trim();
+    if (!targetUrl) {
+      toast.error('Informe a URL do webhook.');
+      return;
+    }
+
+    setIsApplyingWebhook(true);
+    try {
+      const { instances } = await fetchEvolutionInstances();
+      if (!instances || instances.length === 0) {
+        toast.error('Nenhuma instância encontrada na Evolution API.');
+        return;
+      }
+
+      let successCount = 0;
+      for (const inst of instances) {
+        const cleanName = inst.name.split(' ')[0].trim();
+        try {
+          await setEvolutionWebhook(cleanName, targetUrl);
+          successCount++;
+        } catch (err: any) {
+          console.warn(`Erro ao setar webhook para ${cleanName}:`, err.message);
+        }
+      }
+
+      if (successCount > 0) {
+        toast.success(`Webhook configurado com sucesso em ${successCount} instância(s) na Evolution API!`);
+      } else {
+        toast.error('Não foi possível configurar o webhook nas instâncias.');
+      }
+    } catch (err: any) {
+      toast.error(`Falha ao configurar webhook: ${err.message}`);
+    } finally {
+      setIsApplyingWebhook(false);
+    }
+  };
+
   const handleSave = async () => {
     setIsSaving(true);
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 600));
     setIsSaving(false);
-    toast.success('Configurações salvas! Reinicie a aplicação para aplicar as variáveis de ambiente.');
+    toast.success('Configurações salvas!');
   };
 
   return (
@@ -331,7 +375,39 @@ VITE_SUPABASE_ANON_KEY=sua-anon-key-aqui`}
             </button>
           </div>
           <div style={{ fontSize: '11px', color: '#4a6080', marginTop: '4px' }}>
-            Configure esta URL na Evolution API para receber eventos de mensagens
+            Esta URL recebe os eventos de mensagens da Evolution API para acionar a IA e a pausa humana.
+          </div>
+
+          <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn-primary"
+              style={{
+                padding: '9px 18px',
+                fontSize: '12px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                background: 'linear-gradient(135deg, #2563eb, #1d4ed8)',
+              }}
+              onClick={handleApplyWebhook}
+              disabled={isApplyingWebhook}
+            >
+              {isApplyingWebhook ? (
+                <>
+                  <div className="loader" style={{ width: '13px', height: '13px' }} />
+                  Configurando nas instâncias...
+                </>
+              ) : (
+                <>
+                  <Webhook size={14} />
+                  Configurar Webhook na Evolution API Automaticamente
+                </>
+              )}
+            </button>
+            <span style={{ fontSize: '12px', color: '#10b981', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+              <CheckCircle size={14} /> Aplica direto na Evolution API via chave mestra, sem precisar acessar painel externo!
+            </span>
           </div>
         </div>
       </Section>
