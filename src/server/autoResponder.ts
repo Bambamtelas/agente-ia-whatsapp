@@ -8,10 +8,11 @@ declare const globalThis: any;
 
 export interface AgentMediaItem {
   id: string;
+  type?: 'image' | 'audio';
   title: string;
-  url: string; // URL da imagem ou Data URL base64
-  trigger_prompt: string; // Instrução de quando a IA deve enviar esta imagem
-  caption?: string; // Legenda opcional para a imagem no WhatsApp
+  url: string; // URL da mídia ou Data URL base64
+  trigger_prompt: string; // Instrução de quando a IA deve enviar esta mídia
+  caption?: string; // Legenda/texto opcional para a mídia no WhatsApp
   file_name?: string;
   created_at?: string;
 }
@@ -156,30 +157,35 @@ function buildPromptWithMedia(basePrompt: string, mediaCatalog?: AgentMediaItem[
   }
 
   const mediaList = mediaCatalog.map((item, idx) => {
+    const isAudio = item.type === 'audio';
     const trigger = item.trigger_prompt || 'Quando o cliente solicitar ou demonstrar interesse';
+    const tag = isAudio ? `[ENVIAR_AUDIO: ${item.id}]` : `[ENVIAR_IMAGEM: ${item.id}]`;
+    const typeLabel = isAudio ? '🎙️ ÁUDIO / MENSAGEM DE VOZ' : '🖼️ IMAGEM / BANNER';
     return `[MÍDIA #${idx + 1}]
+- TIPO: ${typeLabel}
 - ID: "${item.id}"
 - Título: "${item.title}"
 - Quando enviar: ${trigger}
-${item.caption ? `- Legenda sugerida: "${item.caption}"` : ''}
-- Comando para disparar: [ENVIAR_IMAGEM: ${item.id}]`;
+${item.caption ? `- Descrição / Legenda: "${item.caption}"` : ''}
+- Comando para disparar: ${tag}`;
   }).join('\n\n');
 
   return `${prompt}
 
 ---
-## CATÁLOGO DE IMAGENS E MÍDIAS OFICIAIS DISPONÍVEIS:
-Você tem acesso às seguintes imagens oficiais cadastradas para enviar ao cliente no WhatsApp quando a conversa solicitar:
+## CATÁLOGO DE MÍDIAS OFICIAIS DISPONÍVEIS (IMAGENS E ÁUDIOS):
+Você tem acesso às seguintes mídias oficiais cadastradas para enviar ao cliente no WhatsApp quando a conversa solicitar:
 
 ${mediaList}
 
-REGRAS OBRIGATÓRIAS DE ENVIO DE IMAGENS:
+REGRAS OBRIGATÓRIAS DE ENVIO DE MÍDIAS:
 1. Analise cuidadosamente a mensagem do cliente e o contexto da conversa.
-2. Quando a solicitação do cliente corresponder ao campo "Quando enviar" de uma imagem (exemplo: cliente pediu para ver os planos, pediu tabela de preços, fotos, banners ou demonstrou interesse no produto), você DEVE responder em texto de forma natural e incluir no final da sua mensagem a tag de disparo correspondente:
+2. IMAGENS: Quando a solicitação do cliente corresponder ao campo "Quando enviar" de uma imagem (exemplo: cliente pediu para ver os planos, pediu tabela de preços, fotos, banners ou demonstrou interesse no produto), você DEVE responder em texto de forma natural e incluir no final da sua mensagem a tag de disparo correspondente:
    [ENVIAR_IMAGEM: ID_DA_IMAGEM]
    Exemplo: Se o cliente perguntar os valores do plano, responda com o texto explicativo e termine com: [ENVIAR_IMAGEM: ID_DA_IMAGEM]
-3. Se precisar enviar mais de uma imagem, inclua as tags separadas: [ENVIAR_IMAGEM: ID_1] [ENVIAR_IMAGEM: ID_2].
-4. O sistema irá automaticamente detectar essa tag, remover ela do texto visível e enviar o arquivo de imagem diretamente para o WhatsApp do cliente.
+3. ÁUDIOS DE VOZ: Quando a solicitação corresponder ao campo "Quando enviar" de um áudio (exemplo: cliente perguntou "como funciona", pediu uma explicação detalhada ou áudio explicativo), você DEVE responder com uma introdução natural (exemplo: "Vou te mandar um áudio aqui explicando certinho como funciona:") e incluir no final da mensagem a tag:
+   [ENVIAR_AUDIO: ID_DO_AUDIO]
+4. O sistema irá automaticamente detectar essas tags, removê-las do texto visível e enviar o arquivo de áudio como mensagem de voz gravada ou a imagem diretamente para o WhatsApp do cliente.
 ---`;
 }
 
@@ -857,6 +863,13 @@ class AutoResponderService {
         requestedMediaKeys.push(match[1].trim());
       }
 
+      // Extrai tags de áudios solicitados: [ENVIAR_AUDIO: id] ou [ENVIAR_VOZ: ...]
+      const audioTagRegex = /\[(?:ENVIAR_AUDIO|ENVIAR_VOZ):\s*([^\]]+)\]/gi;
+      const requestedAudioKeys: string[] = [];
+      while ((match = audioTagRegex.exec(aiResponse)) !== null) {
+        requestedAudioKeys.push(match[1].trim());
+      }
+
       // Detecção inteligente adicional: se o cliente pediu expressamente foto/imagem/banner/tabela/plano
       if (requestedMediaKeys.length === 0 && link.mediaCatalog && link.mediaCatalog.length > 0) {
         const userLower = userMessage.toLowerCase();
@@ -865,6 +878,7 @@ class AutoResponderService {
 
         if (asksImage || asksPlans) {
           for (const item of link.mediaCatalog) {
+            if (item.type === 'audio') continue;
             const titleLower = item.title.toLowerCase();
             const triggerLower = (item.trigger_prompt || '').toLowerCase();
 
@@ -882,11 +896,29 @@ class AutoResponderService {
         }
       }
 
-      // Remove a tag do texto para o cliente não ver código
-      const cleanResponseText = aiResponse.replace(mediaTagRegex, '').trim();
+      // Detecção inteligente adicional para áudios: se perguntou "como funciona" ou pediu áudio
+      if (requestedAudioKeys.length === 0 && link.mediaCatalog && link.mediaCatalog.length > 0) {
+        const userLower = userMessage.toLowerCase();
+        const asksAudioOrHowItWorks = userLower.includes('como funciona') || userLower.includes('áudio') || userLower.includes('audio') || userLower.includes('me explica') || userLower.includes('explica') || userLower.includes('funciona');
+        if (asksAudioOrHowItWorks) {
+          for (const item of link.mediaCatalog) {
+            if (item.type === 'audio') {
+              console.log(`[AutoResponder] 🎯 Gatilho inteligente acionado para áudio "${item.title}"`);
+              requestedAudioKeys.push(item.id);
+              break;
+            }
+          }
+        }
+      }
+
+      // Remove as tags do texto para o cliente não ver código
+      const cleanResponseText = aiResponse
+        .replace(mediaTagRegex, '')
+        .replace(audioTagRegex, '')
+        .trim();
 
       logEntry.aiResponse = cleanResponseText || aiResponse;
-      console.log(`[AutoResponder] 📤 Resposta gerada: "${cleanResponseText.substring(0, 90)}..." (Mídias acionadas: ${requestedMediaKeys.length})`);
+      console.log(`[AutoResponder] 📤 Resposta gerada: "${cleanResponseText.substring(0, 90)}..." (Imagens: ${requestedMediaKeys.length}, Áudios: ${requestedAudioKeys.length})`);
 
       // 1. Envia resposta em texto dividida em mensagens individuais separadas
       if (cleanResponseText) {
@@ -954,7 +986,97 @@ class AutoResponderService {
         }
       }
 
-      // 2. Se a IA disparou imagens do catálogo, envia com pausa natural
+      // 2. Se a IA disparou áudios do catálogo, envia como mensagem de voz gravada no WhatsApp (PTT)
+      if (requestedAudioKeys.length > 0 && link.mediaCatalog && link.mediaCatalog.length > 0) {
+        if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
+          console.log(`[HumanPause] 🛑 Envio de áudios abortado para +${targetPhone}: atendimento humano ativo.`);
+          return;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        for (const rawKey of requestedAudioKeys) {
+          if (humanPauseManager.isPaused(link.instanceName, targetPhone)) return;
+
+          const key = rawKey.toLowerCase();
+          const matchedItem = link.mediaCatalog.find(
+            m => (m.type === 'audio' || !m.type) && (m.id.toLowerCase() === key || m.title.toLowerCase() === key || m.title.toLowerCase().includes(key))
+          );
+
+          if (matchedItem && matchedItem.url) {
+            console.log(`[AutoResponder] 🎙️ Enviando mensagem de voz "${matchedItem.title}" para +${targetPhone}...`);
+
+            // Mostra "Gravando áudio..." no WhatsApp do cliente
+            await fetch(`${apiUrl}/chat/sendPresence/${encodeURIComponent(link.instanceName)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+              body: JSON.stringify({ number: targetPhone, presence: 'recording', delay: 2000 }),
+            }).catch(() => {});
+            await new Promise(resolve => setTimeout(resolve, 1800));
+
+            let audioPayload = matchedItem.url;
+            if (audioPayload.startsWith('/uploads/')) {
+              try {
+                const localFilePath = path.resolve(process.cwd(), 'public', audioPayload.replace(/^\//, ''));
+                if (fs.existsSync(localFilePath)) {
+                  const fileBuffer = fs.readFileSync(localFilePath);
+                  audioPayload = fileBuffer.toString('base64');
+                }
+              } catch {}
+            } else if (audioPayload.startsWith('data:')) {
+              const m = audioPayload.match(/^data:([^;]+);base64,(.+)$/s);
+              if (m) audioPayload = m[2];
+            }
+
+            let sentAudioOk = false;
+            try {
+              const pttRes = await fetch(`${apiUrl}/message/sendWhatsAppAudio/${encodeURIComponent(link.instanceName)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+                body: JSON.stringify({
+                  number: targetPhone,
+                  audio: audioPayload,
+                  delay: 1200,
+                  encoding: true,
+                }),
+              });
+
+              if (pttRes.ok) {
+                const pttData: any = await pttRes.json().catch(() => ({}));
+                const pttId = pttData?.key?.id || pttData?.id;
+                humanPauseManager.registerAiSentMessage(pttId, link.instanceName, targetPhone);
+                console.log(`[AutoResponder] ✅ Áudio WhatsApp (PTT) "${matchedItem.title}" enviado para +${targetPhone}!`);
+                sentAudioOk = true;
+              }
+            } catch (err: any) {
+              console.warn('[AutoResponder] Falha em sendWhatsAppAudio, tentando sendMedia:', err.message);
+            }
+
+            if (!sentAudioOk) {
+              const mediaRes = await fetch(`${apiUrl}/message/sendMedia/${encodeURIComponent(link.instanceName)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
+                body: JSON.stringify({
+                  number: targetPhone,
+                  mediatype: 'audio',
+                  mimetype: 'audio/mpeg',
+                  caption: matchedItem.caption || matchedItem.title,
+                  media: audioPayload,
+                  fileName: `${matchedItem.title.toLowerCase().replace(/[^a-z0-9]/g, '_')}.mp3`,
+                }),
+              });
+              if (mediaRes.ok) {
+                const mediaData: any = await mediaRes.json().catch(() => ({}));
+                const mediaId = mediaData?.key?.id || mediaData?.id;
+                humanPauseManager.registerAiSentMessage(mediaId, link.instanceName, targetPhone);
+                console.log(`[AutoResponder] ✅ Áudio enviado como mídia para +${targetPhone}!`);
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Se a IA disparou imagens do catálogo, envia com pausa natural
       if (requestedMediaKeys.length > 0 && link.mediaCatalog && link.mediaCatalog.length > 0) {
         if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
           console.log(`[HumanPause] 🛑 Envio de mídias abortado para +${targetPhone}: atendimento humano ativo.`);
@@ -971,7 +1093,7 @@ class AutoResponderService {
 
           const key = rawKey.toLowerCase();
           const matchedItem = link.mediaCatalog.find(
-            m => m.id.toLowerCase() === key || m.title.toLowerCase() === key || m.title.toLowerCase().includes(key)
+            m => (m.type !== 'audio') && (m.id.toLowerCase() === key || m.title.toLowerCase() === key || m.title.toLowerCase().includes(key))
           );
 
           if (matchedItem && matchedItem.url) {

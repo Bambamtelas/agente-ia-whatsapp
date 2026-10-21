@@ -291,10 +291,20 @@ export default async function handler(req, res) {
 
       const mediaInstruction = mediaCatalog && mediaCatalog.length > 0
         ? `\n---
-## CATÁLOGO DE IMAGENS DISPONÍVEIS:
-${mediaCatalog.map((item, idx) => `[MÍDIA #${idx + 1}] ID: "${item.id}" | Título: "${item.title}" | Quando enviar: ${item.trigger_prompt} | Comando: [ENVIAR_IMAGEM: ${item.id}]`).join('\n')}
+## CATÁLOGO DE MÍDIAS DISPONÍVEIS (IMAGENS E ÁUDIOS):
+Você tem acesso às seguintes mídias oficiais para enviar aos clientes no WhatsApp no momento exato da conversa:
 
-Quando a conversa solicitar uma imagem, inclua a tag [ENVIAR_IMAGEM: ID_DA_IMAGEM] no final da sua resposta.
+${mediaCatalog.map((item, idx) => {
+  const isAudio = item.type === 'audio';
+  const tagCmd = isAudio ? `[ENVIAR_AUDIO: ${item.id}]` : `[ENVIAR_IMAGEM: ${item.id}]`;
+  const typeLabel = isAudio ? '🎙️ ÁUDIO / MENSAGEM DE VOZ' : '🖼️ IMAGEM / BANNER';
+  return `[MÍDIA #${idx + 1}] TIPO: ${typeLabel} | ID: "${item.id}" | Título: "${item.title}" | Quando enviar: ${item.trigger_prompt || 'Quando solicitado'} | Comando: ${tagCmd}`;
+}).join('\n')}
+
+REGRAS OBRIGATÓRIAS DE ENVIO DE MÍDIAS:
+1. IMAGENS: Quando a solicitação do cliente corresponder ao gatilho de uma imagem (ex: pediu preços, planos, banners promocionais), responda em texto de forma natural e inclua no final: [ENVIAR_IMAGEM: ID_DA_IMAGEM].
+2. ÁUDIOS: Quando a solicitação do cliente corresponder ao gatilho de um áudio (ex: perguntou como funciona o sistema, pediu explicação detalhada ou áudio explicativo), responda com um texto de introdução natural (ex: "Vou te mandar um áudio aqui explicando certinho como funciona:") e inclua no final: [ENVIAR_AUDIO: ID_DO_AUDIO].
+3. O sistema remove essas tags do texto final e dispara a mensagem de voz ou imagem diretamente para o WhatsApp do cliente.
 ---`
         : '';
 
@@ -311,16 +321,26 @@ Quando a conversa solicitar uma imagem, inclua a tag [ENVIAR_IMAGEM: ID_DA_IMAGE
         continue;
       }
 
-      // Extrai tags de imagens: [ENVIAR_IMAGEM: id]
-      const mediaTagRegex = /\[(?:ENVIAR_IMAGEM|ENVIAR_FOTO):\s*([^\]]+)\]/gi;
-      const requestedMediaKeys = [];
+      // Extrai tags de imagens: [ENVIAR_IMAGEM: id] ou [ENVIAR_FOTO: id]
+      const imageTagRegex = /\[(?:ENVIAR_IMAGEM|ENVIAR_FOTO):\s*([^\]]+)\]/gi;
+      const requestedImageKeys = [];
       let match;
-      while ((match = mediaTagRegex.exec(rawResponse)) !== null) {
-        requestedMediaKeys.push(match[1].trim());
+      while ((match = imageTagRegex.exec(rawResponse)) !== null) {
+        requestedImageKeys.push(match[1].trim());
+      }
+
+      // Extrai tags de áudios: [ENVIAR_AUDIO: id] ou [ENVIAR_VOZ: id]
+      const audioTagRegex = /\[(?:ENVIAR_AUDIO|ENVIAR_VOZ):\s*([^\]]+)\]/gi;
+      const requestedAudioKeys = [];
+      while ((match = audioTagRegex.exec(rawResponse)) !== null) {
+        requestedAudioKeys.push(match[1].trim());
       }
 
       // Limpa tags do texto final
-      const cleanedResponse = rawResponse.replace(mediaTagRegex, '').trim();
+      const cleanedResponse = rawResponse
+        .replace(imageTagRegex, '')
+        .replace(audioTagRegex, '')
+        .trim();
       const textChunks = splitIntoWhatsAppMessages(cleanedResponse);
 
       // 1. Envia os balões de texto para o WhatsApp
@@ -362,14 +382,94 @@ Quando a conversa solicitar uma imagem, inclua a tag [ENVIAR_IMAGEM: ID_DA_IMAGE
         }
       }
 
-      // 2. Envia as imagens solicitadas
-      if (requestedMediaKeys.length > 0 && mediaCatalog.length > 0) {
-        for (const rawKey of requestedMediaKeys) {
+      // 2. Envia os áudios solicitados (PTT / Mensagem de Voz)
+      if (requestedAudioKeys.length > 0 && mediaCatalog.length > 0) {
+        for (const rawKey of requestedAudioKeys) {
           if (isContactPaused(instanceName, targetPhone)) break;
 
           const key = rawKey.toLowerCase();
           const matchedItem = mediaCatalog.find(
-            m => m.id.toLowerCase() === key || m.title.toLowerCase() === key || m.title.toLowerCase().includes(key)
+            m => (m.type === 'audio' || !m.type) && (m.id.toLowerCase() === key || m.title.toLowerCase() === key || m.title.toLowerCase().includes(key))
+          );
+
+          if (!matchedItem || !matchedItem.url) continue;
+
+          let finalAudioUrl = matchedItem.url;
+          if (finalAudioUrl.startsWith('/')) {
+            finalAudioUrl = `https://agente-ia-whatsapp-ecru.vercel.app${finalAudioUrl}`;
+          }
+
+          // Sinal de gravando áudio no WhatsApp
+          await fetch(`${EVOLUTION_API_URL}/chat/sendPresence/${encodeURIComponent(instanceName)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'apikey': EVOLUTION_API_KEY },
+            body: JSON.stringify({ number: targetPhone, presence: 'recording', delay: 2000 }),
+          }).catch(() => {});
+          await new Promise(r => setTimeout(r, 1500));
+
+          let sentAudio = false;
+          try {
+            const pttRes = await fetch(`${EVOLUTION_API_URL}/message/sendWhatsAppAudio/${encodeURIComponent(instanceName)}`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'apikey': EVOLUTION_API_KEY,
+              },
+              body: JSON.stringify({
+                number: targetPhone,
+                audio: finalAudioUrl,
+                delay: 1200,
+                encoding: true,
+              }),
+            });
+
+            if (pttRes.ok) {
+              const pttData = await pttRes.json().catch(() => ({}));
+              const pttId = pttData?.key?.id || pttData?.id;
+              if (pttId) globalStore.aiSentIds.add(pttId);
+              console.log(`[Vercel Webhook] 🎙️ Áudio de voz (PTT) "${matchedItem.title}" enviado para +${targetPhone}`);
+              sentAudio = true;
+            }
+          } catch (e) {
+            console.warn('[Vercel Webhook] Erro ao enviar sendWhatsAppAudio:', e.message);
+          }
+
+          if (!sentAudio) {
+            try {
+              const mediaRes = await fetch(`${EVOLUTION_API_URL}/message/sendMedia/${encodeURIComponent(instanceName)}`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'apikey': EVOLUTION_API_KEY,
+                },
+                body: JSON.stringify({
+                  number: targetPhone,
+                  mediatype: 'audio',
+                  mimetype: 'audio/mpeg',
+                  caption: matchedItem.caption || matchedItem.title,
+                  media: finalAudioUrl,
+                  fileName: `${matchedItem.title.toLowerCase().replace(/[^a-z0-9]/g, '_')}.mp3`,
+                }),
+              });
+              if (mediaRes.ok) {
+                const mediaData = await mediaRes.json().catch(() => ({}));
+                const mediaId = mediaData?.key?.id || mediaData?.id;
+                if (mediaId) globalStore.aiSentIds.add(mediaId);
+                console.log(`[Vercel Webhook] 🎙️ Áudio via sendMedia "${matchedItem.title}" enviado para +${targetPhone}`);
+              }
+            } catch {}
+          }
+        }
+      }
+
+      // 3. Envia as imagens solicitadas
+      if (requestedImageKeys.length > 0 && mediaCatalog.length > 0) {
+        for (const rawKey of requestedImageKeys) {
+          if (isContactPaused(instanceName, targetPhone)) break;
+
+          const key = rawKey.toLowerCase();
+          const matchedItem = mediaCatalog.find(
+            m => (m.type !== 'audio') && (m.id.toLowerCase() === key || m.title.toLowerCase() === key || m.title.toLowerCase().includes(key))
           );
 
           if (!matchedItem || !matchedItem.url) continue;

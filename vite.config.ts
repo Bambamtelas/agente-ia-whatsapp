@@ -59,7 +59,7 @@ function evolutionApiPlugin(): Plugin {
               const filePath = path.join(uploadsDir, fileName);
 
               if (body.base64) {
-                const rawData = body.base64.replace(/^data:image\/\w+;base64,/, '');
+                const rawData = body.base64.replace(/^data:[^;]+;base64,/, '');
                 fs.writeFileSync(filePath, Buffer.from(rawData, 'base64'));
               }
 

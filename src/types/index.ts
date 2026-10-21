@@ -4,10 +4,11 @@
 
 export interface AgentMediaItem {
   id: string;
+  type?: 'image' | 'audio'; // 'image' (padrão) ou 'audio' (mensagem de voz gravada no WhatsApp)
   title: string;
-  url: string; // URL da imagem ou Data URL base64
-  trigger_prompt: string; // Instrução de quando a IA deve enviar esta imagem
-  caption?: string; // Legenda opcional para a imagem no WhatsApp
+  url: string; // URL da mídia ou Data URL base64
+  trigger_prompt: string; // Instrução de quando a IA deve enviar esta mídia
+  caption?: string; // Legenda opcional para a mídia no WhatsApp
   file_name?: string;
   created_at?: string;
 }
