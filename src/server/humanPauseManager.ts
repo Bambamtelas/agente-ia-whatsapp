@@ -39,6 +39,7 @@ export class HumanPauseManager {
   private pauses: Map<string, HumanPauseRecord> = new Map();
   private aiSentMessageIds: Set<string> = new Set();
   private recentAiSentWindows: Map<string, number> = new Map(); // key -> timestamp em ms
+  private recentAiSentTexts: Map<string, Set<string>> = new Map(); // key -> trechos de textos enviados pela IA
 
   constructor() {
     this.loadFromDisk();
@@ -120,40 +121,107 @@ export class HumanPauseManager {
 
   /**
    * Registra que uma mensagem foi enviada pela própria IA.
-   * Isso garante que ela NUNCA ative a pausa humana.
+   * Suporta chamada com múltiplos IDs (WhatsApp key.id e cuid do banco) e texto enviado.
    */
-  public registerAiSentMessage(msgId?: string, instanceName?: string, phone?: string) {
-    if (msgId) {
-      this.aiSentMessageIds.add(msgId);
-      this.saveAiSentIds();
+  public registerAiSentMessage(
+    params: {
+      id?: string;
+      keyId?: string;
+      instanceName?: string;
+      phone?: string;
+      text?: string;
+    } | string,
+    legacyInstance?: string,
+    legacyPhone?: string
+  ) {
+    let id: string | undefined;
+    let keyId: string | undefined;
+    let instanceName: string | undefined;
+    let phone: string | undefined;
+    let text: string | undefined;
+
+    if (typeof params === 'object') {
+      id = params.id;
+      keyId = params.keyId;
+      instanceName = params.instanceName;
+      phone = params.phone;
+      text = params.text;
+    } else {
+      id = params;
+      instanceName = legacyInstance;
+      phone = legacyPhone;
     }
+
+    if (id) this.aiSentMessageIds.add(id);
+    if (keyId) this.aiSentMessageIds.add(keyId);
+    this.saveAiSentIds();
+
     if (instanceName && phone) {
       const key = buildPauseKey(instanceName, phone);
       this.recentAiSentWindows.set(key, Date.now());
+
+      if (text && text.trim()) {
+        const snippet = text.trim().substring(0, 50).toLowerCase();
+        let set = this.recentAiSentTexts.get(key);
+        if (!set) {
+          set = new Set();
+          this.recentAiSentTexts.set(key, set);
+        }
+        set.add(snippet);
+        if (set.size > 20) {
+          const first = set.values().next().value;
+          if (first) set.delete(first);
+        }
+      }
     }
   }
 
   /**
-   * Verifica se uma mensagem foi gerada/enviada pela IA
+   * Verifica de forma exaustiva se uma mensagem foi gerada/enviada pela IA
    */
-  public isAiSentMessage(msgId?: string, instanceName?: string, phone?: string, msgTimestampMs?: number): boolean {
-    if (msgId && this.aiSentMessageIds.has(msgId)) {
-      return true;
+  public isAiSentMessage(
+    candidateIds: (string | undefined)[] | string | undefined,
+    instanceName?: string,
+    phone?: string,
+    textContent?: string,
+    msgTimestampMs?: number
+  ): boolean {
+    const ids: string[] = Array.isArray(candidateIds)
+      ? candidateIds.filter((x): x is string => Boolean(x && typeof x === 'string' && x.trim()))
+      : (candidateIds ? [candidateIds] : []);
+
+    // 1. Verifica se qualquer um dos IDs (WhatsApp keyId ou DB id) foi disparado pela IA
+    for (const id of ids) {
+      if (this.aiSentMessageIds.has(id)) {
+        return true;
+      }
     }
 
-    // Se a mensagem possui ID e ele NÃO está no conjunto da IA,
-    // trata-se com certeza de uma mensagem manual enviada pelo operador humano
-    if (msgId) {
-      return false;
+    // 2. Se o texto bater com mensagens enviadas recentemente pela IA neste chat
+    if (instanceName && phone && textContent) {
+      const key = buildPauseKey(instanceName, phone);
+      const recentTexts = this.recentAiSentTexts.get(key);
+      if (recentTexts && recentTexts.size > 0) {
+        const cleanContent = textContent.trim().toLowerCase();
+        for (const snippet of recentTexts) {
+          if (cleanContent.startsWith(snippet) || cleanContent.includes(snippet) || snippet.includes(cleanContent.substring(0, 30))) {
+            return true;
+          }
+        }
+      }
     }
 
-    // Apenas se não houver msgId (fallback raro), checa janela recente
+    // 3. Janela de tempo recente: se a IA enviou mensagem para este chat há menos de 45 segundos,
+    // o evento fromMe: true recebido é o eco da própria IA
     if (instanceName && phone) {
       const key = buildPauseKey(instanceName, phone);
       const lastAiSentTime = this.recentAiSentWindows.get(key);
       if (lastAiSentTime) {
-        const compareTime = msgTimestampMs || Date.now();
-        if (Math.abs(compareTime - lastAiSentTime) <= 5000) {
+        const now = Date.now();
+        if (Math.abs(now - lastAiSentTime) <= 45000) {
+          return true;
+        }
+        if (msgTimestampMs && Math.abs(msgTimestampMs - lastAiSentTime) <= 45000) {
           return true;
         }
       }

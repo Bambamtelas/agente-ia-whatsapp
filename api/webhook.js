@@ -11,6 +11,8 @@ const globalStore = globalThis.__serverlessBotStore || {
   pauses: new Map(), // key -> { expiresAt: number, lastMsg?: string }
   aiSentIds: new Set(), // IDs de mensagens disparadas pela IA
   seenMessageIds: new Set(), // IDs de mensagens já processadas
+  recentAiTexts: new Set(), // Trechos de mensagens enviadas pela IA para evitar falso-positivo
+  recentAiWindows: new Map(), // key -> timestamp de envio recente da IA
 };
 globalThis.__serverlessBotStore = globalStore;
 
@@ -98,7 +100,7 @@ async function fetchActiveAgentFromSupabase() {
 }
 
 async function callGeminiAI(systemPrompt, userMessage) {
-  const models = ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-1.5-flash'];
+  const models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash'];
   let lastError = null;
 
   for (const model of models) {
@@ -173,7 +175,7 @@ export default async function handler(req, res) {
       body.instance ||
       body.instanceName ||
       body.data?.instance ||
-      'jdgestor_8ac6207d22e44198a25a'
+      'agente_james_test'
     ).trim();
 
     const rawData = body.data || body;
@@ -195,7 +197,7 @@ export default async function handler(req, res) {
     for (const msg of msgs) {
       if (!msg || !msg.key) continue;
 
-      const msgId = msg.id || msg.key?.id || '';
+      const msgId = msg.id || '';
       const keyId = msg.key?.id || '';
       const fromMe = Boolean(msg.key?.fromMe);
       const remoteJid = msg.key?.remoteJid || '';
@@ -209,7 +211,7 @@ export default async function handler(req, res) {
       if (!targetPhone) continue;
 
       // Evita loops e mensagens duplicadas
-      const dedupeKey = msgId || keyId;
+      const dedupeKey = keyId || msgId;
       if (dedupeKey && globalStore.seenMessageIds.has(dedupeKey)) {
         continue;
       }
@@ -226,18 +228,32 @@ export default async function handler(req, res) {
       // 1. MENSAGEM DO PROPRIETÁRIO (fromMe: true) -> PAUSA HUMANA DE 20 MINUTOS
       // =========================================================================
       if (fromMe) {
-        // Se este ID foi enviado pela IA, não é atendimento humano
-        if ((msgId && globalStore.aiSentIds.has(msgId)) || (keyId && globalStore.aiSentIds.has(keyId))) {
-          continue;
-        }
-
         const textContent = (
           msg.message?.conversation ||
           msg.message?.extendedTextMessage?.text ||
           ''
         ).trim();
+        const textLower = textContent.toLowerCase();
 
-        // Ativa ou reinicia a pausa de 20 minutos
+        // 1. Se qualquer ID da mensagem foi registrado pela IA
+        const isAiId = (msgId && globalStore.aiSentIds.has(msgId)) || (keyId && globalStore.aiSentIds.has(keyId));
+
+        // 2. Se o texto bater com mensagens disparadas recentemente pela IA
+        const isAiText = textLower && Array.from(globalStore.recentAiTexts).some(
+          t => textLower.startsWith(t) || textLower.includes(t) || t.includes(textLower.substring(0, 30))
+        );
+
+        // 3. Janela de tempo de 45 segundos após envio da IA
+        const pauseKey = buildPauseKey(instanceName, targetPhone);
+        const lastAiSentTime = globalStore.recentAiWindows.get(pauseKey);
+        const isRecentAiTime = lastAiSentTime && Math.abs(Date.now() - lastAiSentTime) <= 45000;
+
+        if (isAiId || isAiText || isRecentAiTime) {
+          // Eco da própria IA: ignora sem pausar
+          continue;
+        }
+
+        // Mensagem genuinamente manual enviada pelo operador no WhatsApp!
         setContactPause(instanceName, targetPhone, textContent);
         console.log(`[Vercel Webhook] 👤 Operador manual detectado para +${targetPhone}. IA pausada por 20 minutos.`);
         continue;
@@ -367,10 +383,15 @@ REGRAS OBRIGATÓRIAS DE ENVIO DE MÍDIAS:
 
         if (sendRes.ok) {
           const sendData = await sendRes.json().catch(() => ({}));
-          const sentId = sendData?.key?.id || sendData?.id;
-          if (sentId) {
-            globalStore.aiSentIds.add(sentId);
+          const keyId = sendData?.key?.id;
+          const dbId = sendData?.id;
+          if (keyId) globalStore.aiSentIds.add(keyId);
+          if (dbId) globalStore.aiSentIds.add(dbId);
+          if (chunk) {
+            globalStore.recentAiTexts.add(chunk.substring(0, 50).toLowerCase());
           }
+          const pauseKey = buildPauseKey(instanceName, targetPhone);
+          globalStore.recentAiWindows.set(pauseKey, Date.now());
           console.log(`[Vercel Webhook] ✅ Mensagem ${i + 1}/${textChunks.length} enviada para +${targetPhone}`);
         } else {
           console.warn(`[Vercel Webhook] Falha ao enviar texto para +${targetPhone}:`, sendRes.statusText);

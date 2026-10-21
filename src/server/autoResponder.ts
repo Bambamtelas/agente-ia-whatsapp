@@ -538,20 +538,20 @@ class AutoResponderService {
       if (keyId) this.seenMessageIds.add(keyId);
       this.saveSeenToDisk();
 
-      // Verifica se essa mensagem enviada foi disparada pela própria IA
-      const isAi = humanPauseManager.isAiSentMessage(msgId || keyId, instanceName, targetPhone, msgTimestamp * 1000);
-      if (isAi) {
-        // Mensagem da própria IA: ignora sem pausar
-        return;
-      }
-
-      // Mensagem enviada MANUALMENTE pelo proprietário/atendente no WhatsApp!
       const textContent = (
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
         ''
       ).trim();
 
+      // Verifica se essa mensagem enviada foi disparada pela própria IA (por ID, texto ou janela temporal)
+      const isAi = humanPauseManager.isAiSentMessage([keyId, msgId], instanceName, targetPhone, textContent, msgTimestamp * 1000);
+      if (isAi) {
+        // Mensagem da própria IA: ignora sem pausar
+        return;
+      }
+
+      // Mensagem enviada MANUALMENTE pelo proprietário/atendente no WhatsApp!
       // Ativa ou reinicia a pausa de 20 minutos para este contato
       const pauseRecord = humanPauseManager.setPause(instanceName, targetPhone, textContent);
 
@@ -973,9 +973,16 @@ class AutoResponderService {
             console.warn(`[AutoResponder] Falha no envio do balão ${i + 1}:`, sendErr.message || sendRes.statusText);
           } else {
             const sendData: any = await sendRes.json().catch(() => ({}));
-            const sentId = sendData?.key?.id || sendData?.id;
-            // Registra que este ID é da própria IA para não disparar pausa humana
-            humanPauseManager.registerAiSentMessage(sentId, link.instanceName, targetPhone);
+            const sentKeyId = sendData?.key?.id;
+            const sentDbId = sendData?.id;
+            // Registra que estes IDs e o texto são da própria IA para jamais disparar pausa humana
+            humanPauseManager.registerAiSentMessage({
+              id: sentDbId,
+              keyId: sentKeyId,
+              instanceName: link.instanceName,
+              phone: targetPhone,
+              text: chunk,
+            });
             console.log(`[AutoResponder] ✅ Mensagem ${i + 1}/${textChunks.length} enviada para +${targetPhone}`);
           }
 
