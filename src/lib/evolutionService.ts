@@ -156,7 +156,7 @@ export async function setEvolutionWebhook(instanceName: string, webhookUrl: stri
         url: webhookUrl,
         byEvents: false,
         base64: false,
-        events: ['MESSAGES_UPSERT', 'SEND_MESSAGE'],
+        events: ['MESSAGES_UPSERT'],
       },
     }),
   });

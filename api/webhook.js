@@ -37,17 +37,17 @@ function isContactPaused(instanceName, phone) {
   if (!record) return false;
   if (Date.now() >= record.expiresAt) {
     globalStore.pauses.delete(key);
-    console.log(`[HumanPause Vercel] ▶️ Pausa de 20 minutos expirou para ${key}. IA liberada.`);
+    console.log(`[HumanPause Vercel] ▶️ Pausa de atendimento humano expirou para ${key}. IA liberada.`);
     return false;
   }
   return true;
 }
 
-function setContactPause(instanceName, phone, lastMsg, durationMs = 20 * 60 * 1000) {
+function setContactPause(instanceName, phone, lastMsg, durationMs = 5 * 60 * 1000) {
   const key = buildPauseKey(instanceName, phone);
   const expiresAt = Date.now() + durationMs;
   globalStore.pauses.set(key, { expiresAt, lastMsg });
-  console.log(`[HumanPause Vercel] ⏸️ Pausa ativada/renovada para ${key} até ${new Date(expiresAt).toISOString()}`);
+  console.log(`[HumanPause Vercel] ⏸️ Pausa de 5 minutos ativada para ${key} até ${new Date(expiresAt).toISOString()}`);
 }
 
 function splitIntoWhatsAppMessages(text) {
@@ -80,6 +80,10 @@ function splitIntoWhatsAppMessages(text) {
 }
 
 async function fetchActiveAgentFromSupabase() {
+  if (globalStore.cachedAgent && Date.now() - (globalStore.cachedAgentTime || 0) < 60000) {
+    return globalStore.cachedAgent;
+  }
+
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/agents?is_active=eq.true&order=created_at.desc&limit=1`, {
       headers: {
@@ -90,13 +94,15 @@ async function fetchActiveAgentFromSupabase() {
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
+        globalStore.cachedAgent = data[0];
+        globalStore.cachedAgentTime = Date.now();
         return data[0];
       }
     }
   } catch (err) {
     console.warn('[Vercel Webhook] Falha ao buscar agente no Supabase:', err.message);
   }
-  return null;
+  return globalStore.cachedAgent || null;
 }
 
 async function callGeminiAI(systemPrompt, userMessage) {
@@ -169,6 +175,11 @@ export default async function handler(req, res) {
     }
     if (!body) {
       return res.status(200).json({ success: true, warning: 'Empty body' });
+    }
+
+    const eventName = String(body.event || body.type || '').toUpperCase();
+    if (eventName === 'SEND_MESSAGE' || eventName === 'SEND_MESSAGE_UPDATE') {
+      return res.status(200).json({ success: true, ignored: 'Outbound API event' });
     }
 
     const instanceName = (

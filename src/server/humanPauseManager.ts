@@ -11,7 +11,7 @@ export interface HumanPauseRecord {
 
 const PAUSES_FILE = path.resolve(process.cwd(), '.human-pauses.json');
 const AI_SENT_IDS_FILE = path.resolve(process.cwd(), '.ai-sent-ids.json');
-const DEFAULT_PAUSE_DURATION_MS = 20 * 60 * 1000; // 20 minutos
+const DEFAULT_PAUSE_DURATION_MS = 5 * 60 * 1000; // 5 minutos
 
 /**
  * Normaliza um identificador de telefone WhatsApp:
