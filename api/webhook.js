@@ -254,17 +254,40 @@ export default async function handler(req, res) {
         // 1. Se qualquer ID da mensagem foi registrado pela IA
         const isAiId = (msgId && globalStore.aiSentIds.has(msgId)) || (keyId && globalStore.aiSentIds.has(keyId));
 
-        // 2. Se o texto bater com mensagens disparadas recentemente pela IA
+        // 2. Se o texto contiver palavras-chave ou links exclusivos da IA
+        const botKeywords = [
+          'gestordestreamings',
+          'auto-divulga-whats',
+          'gestor de streamings',
+          'auto divulga whats',
+          'seja bem-vindo',
+          'qual anúncio você viu',
+          'duas opções para você',
+          '85988159811',
+          'edvan dyemison',
+          '199,90',
+          '150,00',
+          '99,90',
+          'teste grátis por 3 dias',
+          'lembretes automáticos de cobrança',
+          'painéis de iptv',
+          'vídeo tutorial disponível',
+          'chave pix',
+          'conheça aqui:'
+        ];
+        const isKnownBot = botKeywords.some(kw => textLower.includes(kw));
+
+        // 3. Se o texto bater com mensagens disparadas recentemente pela IA
         const isAiText = textLower && Array.from(globalStore.recentAiTexts).some(
           t => textLower.startsWith(t) || textLower.includes(t) || t.includes(textLower.substring(0, 30))
         );
 
-        // 3. Janela de tempo de 45 segundos após envio da IA
+        // 4. Janela de tempo de 45 segundos após envio da IA
         const pauseKey = buildPauseKey(instanceName, targetPhone);
         const lastAiSentTime = globalStore.recentAiWindows.get(pauseKey);
         const isRecentAiTime = lastAiSentTime && Math.abs(Date.now() - lastAiSentTime) <= 45000;
 
-        if (isAiId || isAiText || isRecentAiTime) {
+        if (isAiId || isKnownBot || isAiText || isRecentAiTime) {
           // Eco da própria IA: ignora sem pausar
           continue;
         }

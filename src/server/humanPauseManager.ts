@@ -197,7 +197,35 @@ export class HumanPauseManager {
       }
     }
 
-    // 2. Se o texto bater com mensagens enviadas recentemente pela IA neste chat
+    // 2. Se o conteúdo contiver palavras-chave ou links exclusivos do agente de IA
+    if (textContent) {
+      const cleanContent = textContent.trim().toLowerCase();
+      const botKeywords = [
+        'gestordestreamings',
+        'auto-divulga-whats',
+        'gestor de streamings',
+        'auto divulga whats',
+        'seja bem-vindo',
+        'qual anúncio você viu',
+        'duas opções para você',
+        '85988159811',
+        'edvan dyemison',
+        '199,90',
+        '150,00',
+        '99,90',
+        'teste grátis por 3 dias',
+        'lembretes automáticos de cobrança',
+        'painéis de iptv',
+        'vídeo tutorial disponível',
+        'chave pix',
+        'conheça aqui:'
+      ];
+      if (botKeywords.some(kw => cleanContent.includes(kw))) {
+        return true;
+      }
+    }
+
+    // 3. Se o texto bater com mensagens enviadas recentemente pela IA neste chat
     if (instanceName && phone && textContent) {
       const key = buildPauseKey(instanceName, phone);
       const recentTexts = this.recentAiSentTexts.get(key);
