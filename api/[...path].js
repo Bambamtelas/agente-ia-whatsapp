@@ -73,7 +73,56 @@ export default async function handler(req, res) {
 
   // 4. Catálogo de Mídias (/api/media/*)
   if (section === 'media') {
-    return res.status(200).json({ success: true, catalog: [] });
+    global.mediaCatalogsStore = global.mediaCatalogsStore || {
+      '449726e1-53d6-477f-9bed-738e654e7f77': [
+        {
+          id: 'img-gestor-streamings',
+          title: 'Gestor de Streamings',
+          url: '/uploads/media_1792515638252_h44w8.png',
+          trigger_prompt: 'Envie quando o cliente perguntar sobre o Gestor de Streamings.',
+          caption: '🚀 Gestor de Streamings - Gestão de clientes e cobranças automáticas no WhatsApp!',
+          created_at: '2026-10-20T17:05:28.603Z'
+        },
+        {
+          id: 'img-mvgxk5na-lh0x',
+          title: 'Divulga auto 2',
+          url: '/uploads/media_1792515656020_zgkrc.png',
+          trigger_prompt: 'Envie quando o cliente perguntar sobre o Auto Divulga Whats.',
+          caption: 'Auto Divulga Whats.',
+          created_at: '2026-10-20T17:01:29.110Z'
+        }
+      ]
+    };
+
+    const subAction = pathList[1] || '';
+    const agentId = pathList[2] || '';
+
+    // GET /api/media/catalogs
+    if (subAction === 'catalogs') {
+      return res.status(200).json(global.mediaCatalogsStore);
+    }
+
+    // GET & POST /api/media/catalog/:agentId
+    if (subAction === 'catalog') {
+      if (req.method === 'POST') {
+        const newCatalog = Array.isArray(req.body) ? req.body : (req.body?.catalog || []);
+        if (agentId) {
+          global.mediaCatalogsStore[agentId] = newCatalog;
+        }
+        return res.status(200).json({ success: true, catalog: newCatalog });
+      }
+
+      const found = (agentId && global.mediaCatalogsStore[agentId]) || [];
+      return res.status(200).json({ success: true, catalog: found });
+    }
+
+    // POST /api/media/upload
+    if (subAction === 'upload') {
+      const base64 = req.body?.base64;
+      return res.status(200).json({ success: true, url: base64 || '' });
+    }
+
+    return res.status(200).json({ success: true, catalog: global.mediaCatalogsStore['449726e1-53d6-477f-9bed-738e654e7f77'] || [] });
   }
 
   // 5. Pausas de Atendimento Humano (/api/pauses/*)

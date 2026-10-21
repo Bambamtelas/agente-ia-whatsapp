@@ -198,6 +198,9 @@ const AgentForm: React.FC = () => {
     setForm(f => ({ ...f, media_catalog: list }));
 
     if (id && id !== 'new') {
+      try {
+        localStorage.setItem(`agent_media_catalog_${id}`, JSON.stringify(list));
+      } catch {}
       fetch(`/api/media/catalog/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -292,8 +295,11 @@ const AgentForm: React.FC = () => {
     setForm(f => ({ ...f, media_catalog: currentList }));
     setIsMediaModalOpen(false);
 
-    // Salva imediatamente em disco para garantir persistência instantânea
+    // Salva imediatamente em disco e localStorage para garantir persistência instantânea
     if (id && id !== 'new') {
+      try {
+        localStorage.setItem(`agent_media_catalog_${id}`, JSON.stringify(currentList));
+      } catch {}
       fetch(`/api/media/catalog/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
