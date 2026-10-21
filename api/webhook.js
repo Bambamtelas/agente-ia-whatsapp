@@ -239,6 +239,11 @@ export default async function handler(req, res) {
       // 1. MENSAGEM DO PROPRIETÁRIO (fromMe: true) -> PAUSA HUMANA DE 20 MINUTOS
       // =========================================================================
       if (fromMe) {
+        const msgTimestamp = Number(msg.messageTimestamp) || 0;
+        if (msgTimestamp > 0 && (Date.now() - msgTimestamp * 1000 > 120000)) {
+          continue;
+        }
+
         const textContent = (
           msg.message?.conversation ||
           msg.message?.extendedTextMessage?.text ||

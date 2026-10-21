@@ -232,31 +232,40 @@ export class HumanPauseManager {
 
   /**
    * Registra ou renova uma pausa de 20 minutos por intervenção humana
+  /**
+   * Registra ou renova uma pausa de atendimento humano (padrão 5 minutos).
+   * Se a mensagem for antiga e a pausa já tiver expirado no passado, não ativa pausa.
    */
   public setPause(
     instanceName: string,
     phone: string,
     lastHumanMessage?: string,
-    durationMs = DEFAULT_PAUSE_DURATION_MS
-  ): HumanPauseRecord {
+    durationMs = DEFAULT_PAUSE_DURATION_MS,
+    msgTimestampMs?: number
+  ): HumanPauseRecord | null {
     const cleanPhone = normalizePhone(phone);
     const key = buildPauseKey(instanceName, cleanPhone);
 
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + durationMs);
+    const baseTime = msgTimestampMs && msgTimestampMs > 0 ? msgTimestampMs : Date.now();
+    const expiresAtMs = baseTime + durationMs;
+
+    // Se a mensagem enviada for antiga e o prazo de pausa já teria expirado no passado, não pausa!
+    if (expiresAtMs <= Date.now()) {
+      return null;
+    }
 
     const record: HumanPauseRecord = {
       instanceName: (instanceName || '').trim().toLowerCase(),
       phone: cleanPhone,
-      pausedAt: now.toISOString(),
-      expiresAt: expiresAt.toISOString(),
+      pausedAt: new Date(baseTime).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
       lastHumanMessage: lastHumanMessage ? lastHumanMessage.substring(0, 150) : undefined,
     };
 
     this.pauses.set(key, record);
     this.saveToDisk();
 
-    console.log(`[HumanPauseManager] ⏸️ Pausa ativada/renovada para ${key}. Expira em: ${record.expiresAt}`);
+    console.log(`[HumanPauseManager] ⏸️ Pausa ativada para ${key}. Expira em: ${record.expiresAt}`);
     return record;
   }
 

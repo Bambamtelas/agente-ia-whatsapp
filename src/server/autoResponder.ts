@@ -536,7 +536,10 @@ class AutoResponderService {
     if (fromMe) {
       if (msgId) this.seenMessageIds.add(msgId);
       if (keyId) this.seenMessageIds.add(keyId);
-      this.saveSeenToDisk();
+      // Se a mensagem enviada for antiga (mais de 2 minutos atrás), ignora e jamais ativa nova pausa!
+      if (msgTimestamp > 0 && (Date.now() - msgTimestamp * 1000 > 120000)) {
+        return;
+      }
 
       const textContent = (
         msg.message?.conversation ||
@@ -552,8 +555,10 @@ class AutoResponderService {
       }
 
       // Mensagem enviada MANUALMENTE pelo proprietário/atendente no WhatsApp!
-      // Ativa ou reinicia a pausa de 20 minutos para este contato
-      const pauseRecord = humanPauseManager.setPause(instanceName, targetPhone, textContent);
+      const pauseRecord = humanPauseManager.setPause(instanceName, targetPhone, textContent, undefined, msgTimestamp * 1000);
+      if (!pauseRecord) {
+        return;
+      }
 
       // Cancela qualquer resposta da IA que estava no buffer de espera
       const pendingBuffer = this.debounceBuffers.get(targetPhone);
