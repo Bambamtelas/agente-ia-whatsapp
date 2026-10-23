@@ -623,13 +623,26 @@ class AutoResponderService {
         ''
       ).trim();
 
+      // 0. Comando manual de liberação/retomada da IA enviado pelo operador
+      if (textContent && /^#(?:bot|ia|retomar|liberar|robo|robô)\b/i.test(textContent)) {
+        humanPauseManager.clearPause(instanceName, targetPhone);
+        console.log(`[AutoResponder] 🔄 Comando de retomada detectado para +${targetPhone}. IA liberada.`);
+        return;
+      }
+
+      const pushName = (msg.pushName || '').trim().toLowerCase();
+      if (pushName === 'você' || pushName === 'voce') {
+        // Mensagem da própria IA/API: ignora sem pausar
+        return;
+      }
+
       // Salva mensagem manual no histórico para a IA saber o que o humano falou
       if (textContent) {
         chatHistoryManager.addMessage(targetPhone, 'assistant', textContent, msgTimestamp > 0 ? msgTimestamp * 1000 : Date.now(), keyId || msgId);
       }
 
       // Verifica se essa mensagem enviada foi disparada pela própria IA (por ID, texto ou janela temporal)
-      const isAi = humanPauseManager.isAiSentMessage([keyId, msgId], instanceName, targetPhone, textContent, msgTimestamp * 1000);
+      const isAi = humanPauseManager.isAiSentMessage([keyId, msgId], instanceName, targetPhone, textContent, msgTimestamp * 1000, msg.pushName);
       if (isAi) {
         // Mensagem da própria IA: ignora sem pausar
         return;

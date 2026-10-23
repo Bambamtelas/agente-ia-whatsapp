@@ -30,11 +30,15 @@ function normalizePhone(rawPhone) {
 function buildPauseKey(instanceName, phone) {
   const cleanInst = (instanceName || '').trim().toLowerCase();
   const cleanPhone = normalizePhone(phone);
+  if (!cleanPhone) return '';
   return `${cleanInst}:${cleanPhone}`;
 }
 
 function isContactPaused(instanceName, phone) {
-  const key = buildPauseKey(instanceName, phone);
+  const cleanPhone = normalizePhone(phone);
+  if (!cleanPhone) return false;
+  const key = buildPauseKey(instanceName, cleanPhone);
+  if (!key) return false;
   const record = globalStore.pauses.get(key);
   if (!record) return false;
   if (Date.now() >= record.expiresAt) {
@@ -45,11 +49,28 @@ function isContactPaused(instanceName, phone) {
   return true;
 }
 
-function setContactPause(instanceName, phone, lastMsg, durationMs = 5 * 60 * 1000) {
-  const key = buildPauseKey(instanceName, phone);
+function setContactPause(instanceName, phone, lastMsg, durationMs = 20 * 60 * 1000) {
+  const cleanPhone = normalizePhone(phone);
+  const ownerPhone = '558596079396';
+  // Jamais pausa número vazio, menor que 8 dígitos ou o próprio telefone do bot
+  if (!cleanPhone || cleanPhone.length < 8 || cleanPhone === ownerPhone) return;
+  const key = buildPauseKey(instanceName, cleanPhone);
+  if (!key) return;
   const expiresAt = Date.now() + durationMs;
   globalStore.pauses.set(key, { expiresAt, lastMsg });
-  console.log(`[HumanPause Vercel] ⏸️ Pausa de 5 minutos ativada para ${key} até ${new Date(expiresAt).toISOString()}`);
+  console.log(`[HumanPause Vercel] ⏸️ Pausa de atendimento humano ativada exclusivamente para ${key} até ${new Date(expiresAt).toISOString()}`);
+}
+
+function clearContactPause(instanceName, phone) {
+  const cleanPhone = normalizePhone(phone);
+  if (!cleanPhone) return false;
+  const key = buildPauseKey(instanceName, cleanPhone);
+  if (!key) return false;
+  const had = globalStore.pauses.delete(key);
+  if (had) {
+    console.log(`[HumanPause Vercel] ▶️ Pausa removida manualmente para ${key}. IA liberada.`);
+  }
+  return had;
 }
 
 /**
@@ -346,22 +367,36 @@ export default async function handler(req, res) {
       // 1. MENSAGEM DO PROPRIETÁRIO (fromMe: true) -> PAUSA HUMANA DE 20 MINUTOS
       // =========================================================================
       if (fromMe) {
-        const msgTimestamp = Number(msg.messageTimestamp) || 0;
-        if (msgTimestamp > 0 && (Date.now() - msgTimestamp * 1000 > 120000)) {
-          continue;
-        }
-
         const textContent = (
           msg.message?.conversation ||
           msg.message?.extendedTextMessage?.text ||
           ''
         ).trim();
-        const textLower = textContent.toLowerCase();
 
-        // 1. Se qualquer ID da mensagem foi registrado pela IA
+        // 0. Comando manual de liberação/retomada da IA enviado pelo operador
+        if (textContent && /^#(?:bot|ia|retomar|liberar|robo|robô)\b/i.test(textContent)) {
+          clearContactPause(instanceName, targetPhone);
+          console.log(`[Vercel Webhook] 🔄 Comando de retomada da IA acionado para +${targetPhone}. IA liberada.`);
+          continue;
+        }
+
+        const msgTimestamp = Number(msg.messageTimestamp) || 0;
+        if (msgTimestamp > 0 && (Date.now() - msgTimestamp * 1000 > 120000)) {
+          continue;
+        }
+
+        const pushName = (msg.pushName || '').trim().toLowerCase();
+
+        // 1. No Baileys / Evolution API, TODAS as mensagens enviadas pela API carregam pushName === 'Você'
+        if (pushName === 'você' || pushName === 'voce') {
+          // Eco de mensagem enviada pela API do robô: ignora sem pausar!
+          continue;
+        }
+
+        // 2. Se qualquer ID da mensagem foi registrado pela IA
         const isAiId = (msgId && globalStore.aiSentIds.has(msgId)) || (keyId && globalStore.aiSentIds.has(keyId));
 
-        // 2. Se o texto contiver palavras-chave ou links exclusivos da IA
+        // 3. Se o texto contiver palavras-chave ou links exclusivos da IA
         const botKeywords = [
           'gestordestreamings',
           'auto-divulga-whats',
@@ -382,16 +417,17 @@ export default async function handler(req, res) {
           'chave pix',
           'conheça aqui:'
         ];
+        const textLower = textContent.toLowerCase();
         const isKnownBot = botKeywords.some(kw => textLower.includes(kw));
 
-        // 3. Se o texto bater com mensagens disparadas recentemente pela IA
+        // 4. Se o texto bater com mensagens disparadas recentemente pela IA
         const isAiText = textLower && Array.from(globalStore.recentAiTexts).some(
           t => textLower.startsWith(t) || textLower.includes(t) || t.includes(textLower.substring(0, 30))
         );
 
-        // 4. Janela de tempo de 45 segundos após envio da IA
+        // 5. Janela de tempo de 45 segundos após envio da IA
         const pauseKey = buildPauseKey(instanceName, targetPhone);
-        const lastAiSentTime = globalStore.recentAiWindows.get(pauseKey);
+        const lastAiSentTime = pauseKey ? globalStore.recentAiWindows.get(pauseKey) : 0;
         const isRecentAiTime = lastAiSentTime && Math.abs(Date.now() - lastAiSentTime) <= 45000;
 
         if (isAiId || isKnownBot || isAiText || isRecentAiTime) {
@@ -399,9 +435,15 @@ export default async function handler(req, res) {
           continue;
         }
 
+        // 6. Ignora se for o próprio número do WhatsApp do bot (anotações pessoais/recados para si)
+        const ownerPhone = '558596079396';
+        if (!targetPhone || targetPhone.length < 8 || targetPhone === ownerPhone) {
+          continue;
+        }
+
         // Mensagem genuinamente manual enviada pelo operador no WhatsApp!
-        setContactPause(instanceName, targetPhone, textContent);
-        console.log(`[Vercel Webhook] 👤 Operador manual detectado para +${targetPhone}. IA pausada por 20 minutos.`);
+        setContactPause(instanceName, targetPhone, textContent, 20 * 60 * 1000);
+        console.log(`[Vercel Webhook] 👤 Operador manual detectado para +${targetPhone} (${msg.pushName}). IA pausada exclusivamente para este contato por 20 minutos.`);
         continue;
       }
 
@@ -502,6 +544,25 @@ REGRAS OBRIGATÓRIAS DE ENVIO DE MÍDIAS:
             if (rid && seenRecIds.has(rid)) continue;
             if (rid) seenRecIds.add(rid);
             allRecords.push(rec);
+          }
+        }
+
+        // Verificação serverless definitiva no histórico real deste contato específico:
+        // Se a mensagem enviada mais recentemente (fromMe: true) neste chat veio do operador humano nos últimos 20 minutos
+        const recentFromMe = allRecords
+          .filter(r => r.key?.fromMe && (r.id !== msgId && r.key?.id !== keyId))
+          .sort((a, b) => (Number(b.messageTimestamp) || 0) - (Number(a.messageTimestamp) || 0));
+
+        if (recentFromMe.length > 0) {
+          const latestFromMe = recentFromMe[0];
+          const latestPush = (latestFromMe.pushName || '').trim().toLowerCase();
+          const latestTsMs = (Number(latestFromMe.messageTimestamp) || 0) * 1000;
+          const isRecentHuman = latestPush !== 'você' && latestPush !== 'voce' && (Date.now() - latestTsMs < 20 * 60 * 1000);
+
+          if (isRecentHuman) {
+            setContactPause(instanceName, targetPhone, latestFromMe.message?.conversation, 20 * 60 * 1000);
+            console.log(`[Vercel Webhook] ⏸️ Chat +${targetPhone} possui atendimento humano ativo recente (${latestFromMe.pushName}). IA pausada exclusivamente para este contato.`);
+            continue;
           }
         }
 

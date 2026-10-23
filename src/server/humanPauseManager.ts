@@ -11,7 +11,8 @@ export interface HumanPauseRecord {
 
 const PAUSES_FILE = path.resolve(process.cwd(), '.human-pauses.json');
 const AI_SENT_IDS_FILE = path.resolve(process.cwd(), '.ai-sent-ids.json');
-const DEFAULT_PAUSE_DURATION_MS = 5 * 60 * 1000; // 5 minutos
+const DEFAULT_PAUSE_DURATION_MS = 20 * 60 * 1000; // 20 minutos
+const OWNER_PHONE = '558596079396';
 
 /**
  * Normaliza um identificador de telefone WhatsApp:
@@ -32,6 +33,7 @@ export function normalizePhone(rawPhone: string): string {
 export function buildPauseKey(instanceName: string, phone: string): string {
   const cleanInst = (instanceName || '').trim().toLowerCase();
   const cleanPhone = normalizePhone(phone);
+  if (!cleanPhone) return '';
   return `${cleanInst}:${cleanPhone}`;
 }
 
@@ -184,8 +186,17 @@ export class HumanPauseManager {
     instanceName?: string,
     phone?: string,
     textContent?: string,
-    msgTimestampMs?: number
+    msgTimestampMs?: number,
+    pushName?: string
   ): boolean {
+    // 0. Mensagens disparadas pela API no Baileys / Evolution carregam pushName === 'Você'
+    if (pushName) {
+      const p = pushName.trim().toLowerCase();
+      if (p === 'você' || p === 'voce') {
+        return true;
+      }
+    }
+
     const ids: string[] = Array.isArray(candidateIds)
       ? candidateIds.filter((x): x is string => Boolean(x && typeof x === 'string' && x.trim()))
       : (candidateIds ? [candidateIds] : []);
@@ -272,7 +283,11 @@ export class HumanPauseManager {
     msgTimestampMs?: number
   ): HumanPauseRecord | null {
     const cleanPhone = normalizePhone(phone);
+    if (!cleanPhone || cleanPhone.length < 8 || cleanPhone === OWNER_PHONE) {
+      return null;
+    }
     const key = buildPauseKey(instanceName, cleanPhone);
+    if (!key) return null;
 
     const baseTime = msgTimestampMs && msgTimestampMs > 0 ? msgTimestampMs : Date.now();
     const expiresAtMs = baseTime + durationMs;
@@ -293,7 +308,7 @@ export class HumanPauseManager {
     this.pauses.set(key, record);
     this.saveToDisk();
 
-    console.log(`[HumanPauseManager] ⏸️ Pausa ativada para ${key}. Expira em: ${record.expiresAt}`);
+    console.log(`[HumanPauseManager] ⏸️ Pausa ativada exclusivamente para ${key}. Expira em: ${record.expiresAt}`);
     return record;
   }
 
@@ -301,7 +316,10 @@ export class HumanPauseManager {
    * Verifica se o contato está atualmente sob atendimento humano (pausado)
    */
   public isPaused(instanceName: string, phone: string): boolean {
-    const key = buildPauseKey(instanceName, phone);
+    const cleanPhone = normalizePhone(phone);
+    if (!cleanPhone) return false;
+    const key = buildPauseKey(instanceName, cleanPhone);
+    if (!key) return false;
     const record = this.pauses.get(key);
     if (!record) return false;
 
