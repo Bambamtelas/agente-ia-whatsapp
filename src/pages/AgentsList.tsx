@@ -55,11 +55,15 @@ const AgentsList: React.FC = () => {
   };
 
   const handleToggle = async (id: string, currentStatus: boolean) => {
+    const nextStatus = !currentStatus;
+    // Atualização otimista imediata na interface
+    setAgents(prev => prev.map(a => a.id === id ? { ...a, is_active: nextStatus } : a));
     try {
-      await toggleAgentStatus(id, !currentStatus);
-      setAgents(prev => prev.map(a => a.id === id ? { ...a, is_active: !currentStatus } : a));
-      toast.success(!currentStatus ? 'Agente ativado' : 'Agente desativado');
+      await toggleAgentStatus(id, nextStatus);
+      toast.success(nextStatus ? 'Agente ativado com sucesso!' : 'Agente desativado com sucesso!');
     } catch (err: any) {
+      // Reverte se houver erro
+      setAgents(prev => prev.map(a => a.id === id ? { ...a, is_active: currentStatus } : a));
       toast.error(err.message || 'Erro ao atualizar status');
     }
   };

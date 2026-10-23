@@ -138,7 +138,7 @@ const AgentForm: React.FC = () => {
       const savedAgent = await saveAgent(form as any);
       setSaved(true);
 
-      // Notifica o backend em tempo real para sincronizar o catálogo de mídias imediatamente
+      // Notifica o backend em tempo real para sincronizar o catálogo de mídias e status imediatamente
       if (savedAgent?.id) {
         fetch('/api/responder/update-agent', {
           method: 'POST',
@@ -147,6 +147,7 @@ const AgentForm: React.FC = () => {
             agentId: savedAgent.id,
             prompt: savedAgent.prompt,
             mediaCatalog: savedAgent.media_catalog || form.media_catalog || [],
+            enabled: savedAgent.is_active,
           }),
         }).catch(() => {});
       }

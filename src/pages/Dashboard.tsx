@@ -14,9 +14,10 @@ import {
   Globe,
   Database
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import DemoBanner from '../components/DemoBanner';
 import { isSupabaseConfigured } from '../lib/supabase';
-import { fetchAgents } from '../lib/agentsService';
+import { fetchAgents, toggleAgentStatus } from '../lib/agentsService';
 import { fetchEvolutionInstances, type EvolutionRawInstance } from '../lib/evolutionService';
 import type { Agent, WhatsAppInstance } from '../types';
 
@@ -114,6 +115,19 @@ const Dashboard: React.FC = () => {
 
   const activeAgents = agents.filter(a => a.is_active).length;
   const connectedInstances = instances.filter(i => i.connection_status === 'connected').length;
+
+  const handleToggleAgent = async (id: string, currentStatus: boolean, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const nextStatus = !currentStatus;
+    setAgents(prev => prev.map(a => a.id === id ? { ...a, is_active: nextStatus } : a));
+    try {
+      await toggleAgentStatus(id, nextStatus);
+      toast.success(nextStatus ? 'Agente ativado com sucesso!' : 'Agente desativado com sucesso!');
+    } catch (err: any) {
+      setAgents(prev => prev.map(a => a.id === id ? { ...a, is_active: currentStatus } : a));
+      toast.error(err.message || 'Erro ao atualizar status');
+    }
+  };
 
   return (
     <div>
@@ -217,17 +231,27 @@ const Dashboard: React.FC = () => {
                       {agent.ai_provider} · {agent.ai_model}
                     </div>
                   </div>
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    fontSize: '12px',
-                    color: agent.is_active ? '#10b981' : '#8fa3c8',
-                    fontWeight: 500,
-                  }}>
+                  <button
+                    onClick={(e) => handleToggleAgent(agent.id, agent.is_active, e)}
+                    title={agent.is_active ? "Clique para desativar o agente" : "Clique para ativar o agente"}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      fontSize: '12px',
+                      color: agent.is_active ? '#10b981' : '#8fa3c8',
+                      background: agent.is_active ? 'rgba(16, 185, 129, 0.12)' : 'rgba(74, 96, 128, 0.15)',
+                      border: `1px solid ${agent.is_active ? 'rgba(16, 185, 129, 0.3)' : 'rgba(74, 96, 128, 0.2)'}`,
+                      borderRadius: '16px',
+                      padding: '4px 10px',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                  >
                     {agent.is_active ? <CheckCircle size={14} /> : <XCircle size={14} />}
                     {agent.is_active ? 'Ativo' : 'Inativo'}
-                  </div>
+                  </button>
                 </div>
               ))
             )}

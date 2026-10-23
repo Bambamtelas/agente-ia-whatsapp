@@ -153,7 +153,7 @@ function splitIntoWhatsAppMessages(text) {
 }
 
 async function fetchActiveAgentFromSupabase() {
-  if (globalStore.cachedAgent !== undefined && Date.now() - (globalStore.cachedAgentTime || 0) < 10000) {
+  if (globalStore.cachedAgent !== undefined && Date.now() - (globalStore.cachedAgentTime || 0) < 5000) {
     return globalStore.cachedAgent;
   }
 
