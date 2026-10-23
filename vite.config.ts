@@ -175,7 +175,7 @@ function evolutionApiPlugin(): Plugin {
                   : (all[body.agentId] || undefined);
 
                 if (typeof (autoResponder as any).updateAgentData === 'function') {
-                  autoResponder.updateAgentData(body.agentId, body.prompt, currentCatalog);
+                  autoResponder.updateAgentData(body.agentId, body.prompt, currentCatalog, body.enabled);
                 }
               } catch (err: any) {
                 console.warn('[Vite Plugin] Erro ao sincronizar agente:', err.message);

@@ -205,7 +205,7 @@ const server = http.createServer(async (req, res) => {
             : (all[body.agentId] || undefined);
 
           if (typeof autoResponder.updateAgentData === 'function') {
-            autoResponder.updateAgentData(body.agentId, body.prompt, currentCatalog);
+            autoResponder.updateAgentData(body.agentId, body.prompt, currentCatalog, body.enabled);
           }
           return res.end(JSON.stringify({ success: true, links: autoResponder.getLinks() }));
         }

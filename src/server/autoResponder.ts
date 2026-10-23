@@ -376,14 +376,15 @@ class AutoResponderService {
     console.log(`[AutoResponder] Instância "${instanceName}" desvinculada.`);
   }
 
-  public updateAgentData(agentId: string, prompt?: string, mediaCatalog?: AgentMediaItem[]) {
+  public updateAgentData(agentId: string, prompt?: string, mediaCatalog?: AgentMediaItem[], enabled?: boolean) {
     let updated = false;
     for (const link of this.links.values()) {
       if (link.agentId === agentId) {
         if (prompt !== undefined) link.prompt = prompt;
         if (mediaCatalog !== undefined) link.mediaCatalog = mediaCatalog;
+        if (enabled !== undefined) link.enabled = enabled;
         updated = true;
-        console.log(`[AutoResponder] 🔄 Instância "${link.instanceName}" atualizada com novo prompt e ${link.mediaCatalog?.length || 0} mídias.`);
+        console.log(`[AutoResponder] 🔄 Instância "${link.instanceName}" atualizada (Ativo: ${link.enabled}, Mídias: ${link.mediaCatalog?.length || 0}).`);
       }
     }
     if (updated) {

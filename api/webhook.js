@@ -153,7 +153,7 @@ function splitIntoWhatsAppMessages(text) {
 }
 
 async function fetchActiveAgentFromSupabase() {
-  if (globalStore.cachedAgent && Date.now() - (globalStore.cachedAgentTime || 0) < 60000) {
+  if (globalStore.cachedAgent !== undefined && Date.now() - (globalStore.cachedAgentTime || 0) < 10000) {
     return globalStore.cachedAgent;
   }
 
@@ -170,6 +170,11 @@ async function fetchActiveAgentFromSupabase() {
         globalStore.cachedAgent = data[0];
         globalStore.cachedAgentTime = Date.now();
         return data[0];
+      } else {
+        // Nenhum agente ativo encontrado (usuário desativou o agente no painel)
+        globalStore.cachedAgent = null;
+        globalStore.cachedAgentTime = Date.now();
+        return null;
       }
     }
   } catch (err) {
@@ -466,6 +471,10 @@ export default async function handler(req, res) {
 
       // Busca agente oficial no Supabase
       const agent = await fetchActiveAgentFromSupabase();
+      if (!agent || agent.is_active === false) {
+        console.log(`[Vercel Webhook] 🛑 Agente de IA está DESATIVADO no painel. Mensagem de +${targetPhone} ignorada.`);
+        continue;
+      }
       let basePrompt = agent?.prompt || '';
       const mediaCatalog = agent?.media_catalog || [
         {

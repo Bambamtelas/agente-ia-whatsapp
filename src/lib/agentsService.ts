@@ -241,4 +241,13 @@ export async function toggleAgentStatus(id: string, is_active: boolean): Promise
     .eq('id', id);
 
   if (error) throw new Error(error.message);
+
+  // Sincroniza estado de ativação com o auto-responder
+  try {
+    await fetch('/api/responder/update-agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId: id, enabled: is_active }),
+    });
+  } catch {}
 }
