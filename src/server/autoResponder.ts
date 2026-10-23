@@ -1,7 +1,8 @@
 import { generateAIResponse } from './aiEngine.ts';
 import fs from 'node:fs';
 import path from 'node:path';
-import { humanPauseManager, normalizePhone } from './humanPauseManager.ts';
+import { humanPauseManager } from './humanPauseManager.ts';
+import { chatHistoryManager } from './chatHistoryManager.ts';
 
 declare const process: any;
 declare const globalThis: any;
@@ -134,7 +135,77 @@ function splitIntoMessages(fullText: string): string[] {
   return messages.length > 0 ? messages : [fullText];
 }
 
-function buildPromptWithMedia(basePrompt: string, mediaCatalog?: AgentMediaItem[]): string {
+/**
+ * Sanitiza a resposta gerada pela IA em conversas em andamento para impedir 100% repetição de saudações de boas-vindas
+ */
+function sanitizeOngoingResponse(text: string, userMessage: string, historyCount: number): string {
+  if (!text || historyCount <= 0) return text;
+
+  let cleaned = text.trim();
+
+  // 1. Se o usuário não pediu imagem explicitamente nesta mensagem, remove tags de imagens
+  const userLower = (userMessage || '').toLowerCase().trim();
+  const askedForMedia = /\b(foto|fotos|imagem|imagens|banner|banners|print|prints|tabela|tabelas|catalogo|catálogo)\b/i.test(userLower);
+  if (!askedForMedia) {
+    cleaned = cleaned.replace(/\[(?:ENVIAR_IMAGEM|ENVIAR_FOTO):\s*[^\]]+\]/gi, '').trim();
+  }
+
+  // 2. Expressões de boas-vindas proibidas em conversas em andamento
+  const welcomePatterns = [
+    /^Olá!?(?:\s+Tudo bem\??)?(?:\s*😊)?\s*Seja bem-vindo\(a\)!?\s*/i,
+    /^Seja bem-vindo\(a\)!?\s*/i,
+    /^Bem-vindo\(a\)!?\s*/i,
+    /^Olá,\s*seja bem-vindo\(a\)!?\s*/i,
+  ];
+
+  let hadWelcome = false;
+  for (const pat of welcomePatterns) {
+    if (pat.test(cleaned)) {
+      cleaned = cleaned.replace(pat, '').trim();
+      hadWelcome = true;
+      break;
+    }
+  }
+
+  const isGreetingOnly = /^(ol[aá]|oi|oie|bom dia|boa tarde|boa noite|opa|salve)[\s!.]*$/i.test(userLower);
+  const isJustHelpPrompt = /^(como posso te ajudar( hoje)?\??|\s*)$/i.test(cleaned.trim());
+
+  if (isGreetingOnly && (hadWelcome || isJustHelpPrompt)) {
+    return 'Opa! Tudo bem? 😊 Como posso te ajudar agora? Conseguiu dar uma olhada no sistema ou ficou com alguma dúvida?';
+  }
+
+  if (hadWelcome && cleaned.length > 0) {
+    cleaned = cleaned.replace(/^como posso te ajudar( hoje)?\??\s*/i, '').trim();
+    if (!cleaned) {
+      return 'Opa! Tudo certo? Como posso te ajudar agora? Ficou com alguma dúvida? 😊';
+    }
+    return cleaned;
+  }
+
+  return cleaned;
+}
+
+function buildPromptWithMedia(basePrompt: string, mediaCatalog?: AgentMediaItem[], historyCount: number = 0): string {
+  let ongoingNotice = '';
+  if (historyCount > 0) {
+    ongoingNotice = `
+---
+## ⚠️ ATENÇÃO MÁXIMA: CONVERSA JÁ EM ANDAMENTO (${historyCount} mensagens no histórico):
+- O cliente JÁ ESTÁ conversando com você. Este NÃO é o primeiro contato.
+- PROIBIDO: NUNCA envie saudações de boas-vindas ("Olá! Tudo bem? 😊 Seja bem-vindo(a)...", "Seja bem-vindo(a)!", etc.).
+- PROIBIDO: NUNCA pergunte "Como posso te ajudar hoje?" como se fosse o início da conversa.
+- PROIBIDO: NUNCA pergunte qual anúncio ele viu ou qual sistema deseja conhecer.
+- PROIBIDO: NUNCA envie fotos/banners promocionais iniciais.
+- SE O CLIENTE ENVIAR APENAS CUMPRIMENTO ("ola", "oi", "bom dia", "boa tarde", "boa noite", etc.):
+  Responda com brevidade e naturalidade de continuidade, por exemplo:
+  "Opa! Tudo bem? 😊 Como posso te ajudar agora? Conseguiu ver o link do teste ou ficou com alguma dúvida?"
+- SE O CLIENTE ENVIAR FEEDBACK OU AGRADECIMENTO CURTO ("show", "top", "legal", "beleza", "ok", "👍", "valeu"):
+  Responda de forma receptiva, curta e cordial:
+  "Show de bola! Qualquer dúvida durante o teste ou na configuração, só me chamar por aqui. Bom proveito! 😊"
+- OBRIGATÓRIO: Responda DIRETAMENTE à última mensagem enviada pelo cliente, avançando no fluxo comercial com naturalidade e tirando dúvidas de onde parou.
+---`;
+  }
+
   const formattingInstruction = `
 ---
 ## REGRA DE FORMATO PARA WHATSAPP (MENSAGENS SEPARADAS):
@@ -150,7 +221,7 @@ function buildPromptWithMedia(basePrompt: string, mediaCatalog?: AgentMediaItem[
 - Cada parágrafo será disparado pelo sistema como um balão de mensagem SEPARADO para o cliente.
 ---`;
 
-  let prompt = `${basePrompt}\n${formattingInstruction}`;
+  let prompt = `${basePrompt}\n${ongoingNotice}\n${formattingInstruction}`;
 
   if (!mediaCatalog || mediaCatalog.length === 0) {
     return prompt;
@@ -503,10 +574,14 @@ class AutoResponderService {
   public async processSingleMessage(
     msg: any,
     link?: LinkedAgentConfig,
-    contextMessages?: any[],
+    _contextMessages?: any[],
     explicitInstanceName?: string
   ) {
     if (!msg || !msg.key) return;
+    if (!link || !link.enabled) {
+      // Ignora sumariamente qualquer mensagem de instâncias não vinculadas a este sistema
+      return;
+    }
 
     const msgId = msg.id || '';
     const keyId = msg.key?.id || '';
@@ -520,8 +595,9 @@ class AutoResponderService {
       return;
     }
 
-    let targetPhone = msg.key?.remoteJidAlt || msg.key?.remoteJid || '';
-    targetPhone = normalizePhone(targetPhone);
+    // Registra mapeamento entre LID e telefone real
+    chatHistoryManager.registerLidMapping(remoteJid, msg.key?.remoteJidAlt);
+    let targetPhone = chatHistoryManager.getCanonicalPhone(msg.key?.remoteJidAlt || remoteJid);
     if (!targetPhone) return;
 
     if ((msgId && this.seenMessageIds.has(msgId)) || (keyId && this.seenMessageIds.has(keyId))) {
@@ -546,6 +622,11 @@ class AutoResponderService {
         msg.message?.extendedTextMessage?.text ||
         ''
       ).trim();
+
+      // Salva mensagem manual no histórico para a IA saber o que o humano falou
+      if (textContent) {
+        chatHistoryManager.addMessage(targetPhone, 'assistant', textContent, msgTimestamp > 0 ? msgTimestamp * 1000 : Date.now(), keyId || msgId);
+      }
 
       // Verifica se essa mensagem enviada foi disparada pela própria IA (por ID, texto ou janela temporal)
       const isAi = humanPauseManager.isAiSentMessage([keyId, msgId], instanceName, targetPhone, textContent, msgTimestamp * 1000);
@@ -652,15 +733,22 @@ class AutoResponderService {
     }
     this.saveSeenToDisk();
 
+    // Salva a mensagem recebida do cliente no gerenciador de histórico persistente
+    chatHistoryManager.addMessage(
+      targetPhone,
+      'user',
+      textContent,
+      msgTimestamp > 0 ? msgTimestamp * 1000 : Date.now(),
+      keyId || msgId
+    );
+
     // Cancela qualquer timer de encerramento pendente para este contato
     if (this.chatCloseTimers.has(targetPhone)) {
       clearTimeout(this.chatCloseTimers.get(targetPhone));
       this.chatCloseTimers.delete(targetPhone);
     }
 
-    const wasClosed = this.closedChats.has(targetPhone);
-    if (wasClosed) {
-      console.log(`[AutoResponder] 🔄 Cliente +${targetPhone} iniciou nova conversa após encerramento anterior.`);
+    if (this.closedChats.has(targetPhone)) {
       this.closedChats.delete(targetPhone);
     }
 
@@ -669,35 +757,12 @@ class AutoResponderService {
     this.chatLastActiveLink.set(targetPhone, link);
     this.chatSenderNames.set(targetPhone, msg.pushName || 'Cliente');
 
-    // Extrai histórico recente da conversa (se estava encerrada, começa do zero sem misturar contexto velho)
-    const conversationHistory: Array<{ role: 'user' | 'assistant'; text: string }> = [];
-    if (!wasClosed && contextMessages && contextMessages.length > 0) {
-      const recentMessages = contextMessages
-        .filter(m => {
-          const p = normalizePhone(m.key?.remoteJidAlt || m.key?.remoteJid || '');
-          return p === targetPhone && m.id !== msgId && m.key?.id !== keyId;
-        })
-        .sort((a, b) => (a.messageTimestamp || 0) - (b.messageTimestamp || 0))
-        .slice(-10);
-
-      for (const rm of recentMessages) {
-        const rmText = rm.message?.conversation || rm.message?.extendedTextMessage?.text;
-        if (rmText && rmText.trim()) {
-          conversationHistory.push({
-            role: rm.key?.fromMe ? 'assistant' : 'user',
-            text: rmText.trim(),
-          });
-        }
-      }
-    }
-
     // Envia para o buffer de debounce do contato
     this.bufferIncomingMessage(
       targetPhone,
       msg.pushName || 'Cliente',
       { id: msgId, keyId, text: textContent, timestamp: msgTimestamp },
-      link,
-      conversationHistory
+      link
     );
   }
 
@@ -723,6 +788,11 @@ class AutoResponderService {
       }
     }
 
+    if (!link || !link.enabled) {
+      console.log(`[AutoResponder] 🛑 Webhook ignorado: instância "${instanceName}" não possui agente vinculado ativo.`);
+      return;
+    }
+
     const rawData = payload.data || payload;
     let msgs: any[] = [];
     if (Array.isArray(rawData)) {
@@ -745,8 +815,7 @@ class AutoResponderService {
     targetPhone: string,
     senderName: string,
     msg: { id: string; keyId: string; text: string; timestamp: number },
-    link: LinkedAgentConfig,
-    history: Array<{ role: 'user' | 'assistant'; text: string }>
+    link: LinkedAgentConfig
   ) {
     let buffer = this.debounceBuffers.get(targetPhone);
 
@@ -754,7 +823,6 @@ class AutoResponderService {
       clearTimeout(buffer.timer);
       buffer.messages.push(msg);
       buffer.senderName = senderName;
-      buffer.conversationHistory = history;
       console.log(`[AutoResponder] 💬 Mensagem adicional de +${targetPhone} ("${msg.text}") agrupada ao buffer.`);
     } else {
       buffer = {
@@ -762,7 +830,7 @@ class AutoResponderService {
         messages: [msg],
         senderName,
         link,
-        conversationHistory: history,
+        conversationHistory: [],
       };
       this.debounceBuffers.set(targetPhone, buffer);
       console.log(`[AutoResponder] 📥 Nova mensagem de +${targetPhone} ("${msg.text}"). Aguardando 5s para agrupar frases.`);
@@ -788,7 +856,7 @@ class AutoResponderService {
 
     if (this.processingChats.has(targetPhone)) {
       console.log(`[AutoResponder] ⏳ Chat +${targetPhone} já ocupado gerando resposta. Reagendando envio...`);
-      setTimeout(() => this.bufferIncomingMessage(targetPhone, buffer.senderName, buffer.messages[0], buffer.link, buffer.conversationHistory), 2000);
+      setTimeout(() => this.bufferIncomingMessage(targetPhone, buffer.senderName, buffer.messages[0], buffer.link), 2000);
       return;
     }
 
@@ -797,8 +865,7 @@ class AutoResponderService {
       buffer.link,
       targetPhone,
       buffer.senderName,
-      combinedText,
-      buffer.conversationHistory
+      combinedText
     );
   }
 
@@ -806,8 +873,7 @@ class AutoResponderService {
     link: LinkedAgentConfig,
     targetPhone: string,
     senderName: string,
-    userMessage: string,
-    conversationHistory: Array<{ role: 'user' | 'assistant'; text: string }>
+    userMessage: string
   ) {
     // Verificação pré-geração: se a IA foi pausada, não gera resposta
     if (humanPauseManager.isPaused(link.instanceName, targetPhone)) {
@@ -838,14 +904,25 @@ class AutoResponderService {
       const openaiKey = getEnvKey('OPENAI_API_KEY');
       const groqKey = getEnvKey('GROQ_API_KEY');
 
-      const enrichedSystemPrompt = buildPromptWithMedia(link.prompt, link.mediaCatalog);
+      // 1. Carrega histórico dinâmico e hidrata da Evolution API se estiver vazio
+      let history = chatHistoryManager.getHistory(targetPhone);
+      if (history.length <= 1) {
+        history = await chatHistoryManager.hydrateFromEvolution(link.instanceName, targetPhone, apiUrl, apiKey);
+      }
+
+      // 2. Filtra histórico para conter apenas as mensagens anteriores ao userMessage atual
+      const historyToSend = history.filter(
+        (h, idx) => !(idx === history.length - 1 && h.role === 'user' && h.text === userMessage.trim())
+      );
+
+      const enrichedSystemPrompt = buildPromptWithMedia(link.prompt, link.mediaCatalog, historyToSend.length);
 
       const aiResponse = await generateAIResponse({
         provider: link.provider,
         model: link.model,
         systemPrompt: enrichedSystemPrompt,
         userMessage,
-        conversationHistory,
+        conversationHistory: historyToSend,
         apiKeys: {
           gemini: geminiKey,
           openai: openaiKey,
@@ -875,22 +952,22 @@ class AutoResponderService {
         requestedAudioKeys.push(match[1].trim());
       }
 
-      // Detecção inteligente adicional: se o cliente pediu expressamente foto/imagem/banner/tabela/plano
+      // Detecção inteligente adicional: se o cliente pediu expressamente foto/imagem/banner/tabela/catálogo
       if (requestedMediaKeys.length === 0 && link.mediaCatalog && link.mediaCatalog.length > 0) {
         const userLower = userMessage.toLowerCase();
         const asksImage = userLower.includes('foto') || userLower.includes('imagem') || userLower.includes('banner') || userLower.includes('print') || userLower.includes('tabela') || userLower.includes('catalogo') || userLower.includes('catálogo');
-        const asksPlans = userLower.includes('plano') || userLower.includes('planos') || userLower.includes('preço') || userLower.includes('quanto custa') || userLower.includes('valor');
 
-        if (asksImage || asksPlans) {
+        if (asksImage) {
           for (const item of link.mediaCatalog) {
             if (item.type === 'audio') continue;
             const titleLower = item.title.toLowerCase();
             const triggerLower = (item.trigger_prompt || '').toLowerCase();
 
             if (
-              (titleLower.includes('gestor') && (userLower.includes('gestor') || asksPlans)) ||
+              (titleLower.includes('gestor') && userLower.includes('gestor')) ||
               (titleLower.includes('divulga') && userLower.includes('divulga')) ||
-              (triggerLower.includes('plano') && asksPlans) ||
+              triggerLower.includes('foto') ||
+              triggerLower.includes('imagem') ||
               asksImage
             ) {
               console.log(`[AutoResponder] 🎯 Gatilho inteligente acionado para imagem "${item.title}"`);
@@ -917,10 +994,19 @@ class AutoResponderService {
       }
 
       // Remove as tags do texto para o cliente não ver código
-      const cleanResponseText = aiResponse
+      let cleanResponseText = aiResponse
         .replace(mediaTagRegex, '')
         .replace(audioTagRegex, '')
         .trim();
+
+      // Descarta fotos promocionais não solicitadas em conversas já em andamento
+      const askedForMedia = /\b(foto|fotos|imagem|imagens|banner|banners|print|prints|tabela|tabelas|catalogo|catálogo)\b/i.test(userMessage);
+      if (historyToSend.length > 0 && !askedForMedia) {
+        requestedMediaKeys.length = 0;
+      }
+
+      // Sanitiza resposta para eliminar qualquer resquício de repetição de boas-vindas
+      cleanResponseText = sanitizeOngoingResponse(cleanResponseText, userMessage, historyToSend.length);
 
       logEntry.aiResponse = cleanResponseText || aiResponse;
       console.log(`[AutoResponder] 📤 Resposta gerada: "${cleanResponseText.substring(0, 90)}..." (Imagens: ${requestedMediaKeys.length}, Áudios: ${requestedAudioKeys.length})`);
@@ -988,6 +1074,8 @@ class AutoResponderService {
               phone: targetPhone,
               text: chunk,
             });
+            // Registra no histórico dinâmico de conversas
+            chatHistoryManager.addMessage(targetPhone, 'assistant', chunk, Date.now(), sentKeyId || sentDbId);
             console.log(`[AutoResponder] ✅ Mensagem ${i + 1}/${textChunks.length} enviada para +${targetPhone}`);
           }
 
@@ -1057,6 +1145,7 @@ class AutoResponderService {
                 const pttData: any = await pttRes.json().catch(() => ({}));
                 const pttId = pttData?.key?.id || pttData?.id;
                 humanPauseManager.registerAiSentMessage(pttId, link.instanceName, targetPhone);
+                chatHistoryManager.addMessage(targetPhone, 'assistant', `[Áudio enviado: ${matchedItem.title}]`, Date.now(), pttId);
                 console.log(`[AutoResponder] ✅ Áudio WhatsApp (PTT) "${matchedItem.title}" enviado para +${targetPhone}!`);
                 sentAudioOk = true;
               }
@@ -1081,6 +1170,7 @@ class AutoResponderService {
                 const mediaData: any = await mediaRes.json().catch(() => ({}));
                 const mediaId = mediaData?.key?.id || mediaData?.id;
                 humanPauseManager.registerAiSentMessage(mediaId, link.instanceName, targetPhone);
+                chatHistoryManager.addMessage(targetPhone, 'assistant', `[Áudio enviado: ${matchedItem.title}]`, Date.now(), mediaId);
                 console.log(`[AutoResponder] ✅ Áudio enviado como mídia para +${targetPhone}!`);
               }
             }
@@ -1162,6 +1252,7 @@ class AutoResponderService {
               const mediaData: any = await mediaRes.json().catch(() => ({}));
               const mediaId = mediaData?.key?.id || mediaData?.id;
               humanPauseManager.registerAiSentMessage(mediaId, link.instanceName, targetPhone);
+              chatHistoryManager.addMessage(targetPhone, 'assistant', `[Imagem enviada: ${matchedItem.title}]`, Date.now(), mediaId);
               console.log(`[AutoResponder] ✅ Imagem "${matchedItem.title}" enviada com sucesso para +${targetPhone}!`);
             } else {
               const mediaErr: any = await mediaRes.json().catch(() => ({}));

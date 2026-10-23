@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Database,
   Smartphone,
@@ -124,6 +124,22 @@ const Settings: React.FC = () => {
   const [copied, setCopied] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isApplyingWebhook, setIsApplyingWebhook] = useState(false);
+  const [targetInstance, setTargetInstance] = useState('agente_james_test');
+  const [availableInstances, setAvailableInstances] = useState<string[]>([]);
+
+  useEffect(() => {
+    fetchEvolutionInstances().then(res => {
+      if (res?.instances && res.instances.length > 0) {
+        setAvailableInstances(res.instances.map(i => i.name));
+      }
+    }).catch(() => {});
+
+    fetch('/api/responder/links').then(r => r.json()).then(links => {
+      if (Array.isArray(links) && links[0]?.instanceName) {
+        setTargetInstance(links[0].instanceName);
+      }
+    }).catch(() => {});
+  }, []);
 
   const webhookExample = defaultWebhook;
 
@@ -140,32 +156,18 @@ const Settings: React.FC = () => {
       return;
     }
 
+    const cleanName = (targetInstance || 'agente_james_test').split(' ')[0].trim();
+    if (!cleanName) {
+      toast.error('Selecione uma instância para aplicar o webhook.');
+      return;
+    }
+
     setIsApplyingWebhook(true);
     try {
-      const { instances } = await fetchEvolutionInstances();
-      if (!instances || instances.length === 0) {
-        toast.error('Nenhuma instância encontrada na Evolution API.');
-        return;
-      }
-
-      let successCount = 0;
-      for (const inst of instances) {
-        const cleanName = inst.name.split(' ')[0].trim();
-        try {
-          await setEvolutionWebhook(cleanName, targetUrl);
-          successCount++;
-        } catch (err: any) {
-          console.warn(`Erro ao setar webhook para ${cleanName}:`, err.message);
-        }
-      }
-
-      if (successCount > 0) {
-        toast.success(`Webhook configurado com sucesso em ${successCount} instância(s) na Evolution API!`);
-      } else {
-        toast.error('Não foi possível configurar o webhook nas instâncias.');
-      }
+      await setEvolutionWebhook(cleanName, targetUrl);
+      toast.success(`Webhook configurado com sucesso APENAS na instância "${cleanName}"!`);
     } catch (err: any) {
-      toast.error(`Falha ao configurar webhook: ${err.message}`);
+      toast.error(`Falha ao configurar webhook na instância ${cleanName}: ${err.message}`);
     } finally {
       setIsApplyingWebhook(false);
     }
@@ -378,6 +380,29 @@ VITE_SUPABASE_ANON_KEY=sua-anon-key-aqui`}
             Esta URL recebe os eventos de mensagens da Evolution API para acionar a IA e a pausa humana.
           </div>
 
+          <div style={{ marginTop: '16px', marginBottom: '14px' }}>
+            <label className="form-label">Instância WhatsApp Alvo (Isolamento de Segurança)</label>
+            <select
+              className="input-field"
+              value={targetInstance}
+              onChange={e => setTargetInstance(e.target.value)}
+              style={{ background: '#0d1527', color: '#e8f0fe' }}
+            >
+              {availableInstances.length === 0 ? (
+                <option value="agente_james_test">agente_james_test (Padrão)</option>
+              ) : (
+                availableInstances.map(name => (
+                  <option key={name} value={name}>
+                    {name} {name === 'agente_james_test' ? '⭐ (Vinculada ao Agente James)' : ''}
+                  </option>
+                ))
+              )}
+            </select>
+            <div style={{ fontSize: '11px', color: '#10b981', marginTop: '4px' }}>
+              🛡️ <strong>Segurança Ativa:</strong> O webhook será configurado exclusivamente nesta instância selecionada para proteger e isolar instâncias de outros negócios no mesmo servidor.
+            </div>
+          </div>
+
           <div style={{ marginTop: '16px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
             <button
               type="button"
@@ -396,17 +421,17 @@ VITE_SUPABASE_ANON_KEY=sua-anon-key-aqui`}
               {isApplyingWebhook ? (
                 <>
                   <div className="loader" style={{ width: '13px', height: '13px' }} />
-                  Configurando nas instâncias...
+                  Configurando na instância selecionada...
                 </>
               ) : (
                 <>
                   <Webhook size={14} />
-                  Configurar Webhook na Evolution API Automaticamente
+                  Configurar Webhook na Instância "{targetInstance}"
                 </>
               )}
             </button>
             <span style={{ fontSize: '12px', color: '#10b981', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-              <CheckCircle size={14} /> Aplica direto na Evolution API via chave mestra, sem precisar acessar painel externo!
+              <CheckCircle size={14} /> Aplicação isolada e segura na Evolution API!
             </span>
           </div>
         </div>

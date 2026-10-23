@@ -13,6 +13,8 @@ const globalStore = globalThis.__serverlessBotStore || {
   seenMessageIds: new Set(), // IDs de mensagens já processadas
   recentAiTexts: new Set(), // Trechos de mensagens enviadas pela IA para evitar falso-positivo
   recentAiWindows: new Map(), // key -> timestamp de envio recente da IA
+  lidToPhone: new Map(), // LID -> Canonical Phone
+  phoneToLid: new Map(), // Phone -> LID
 };
 globalThis.__serverlessBotStore = globalStore;
 
@@ -48,6 +50,56 @@ function setContactPause(instanceName, phone, lastMsg, durationMs = 5 * 60 * 100
   const expiresAt = Date.now() + durationMs;
   globalStore.pauses.set(key, { expiresAt, lastMsg });
   console.log(`[HumanPause Vercel] ⏸️ Pausa de 5 minutos ativada para ${key} até ${new Date(expiresAt).toISOString()}`);
+}
+
+/**
+ * Sanitiza a resposta gerada pela IA em conversas em andamento para impedir 100% repetição de saudações de boas-vindas
+ */
+function sanitizeOngoingResponse(text, userMessage, historyCount) {
+  if (!text || historyCount <= 0) return text;
+
+  let cleaned = text.trim();
+
+  // 1. Se o usuário não pediu imagem explicitamente nesta mensagem, remove tags de imagens
+  const userLower = (userMessage || '').toLowerCase().trim();
+  const askedForMedia = /\b(foto|fotos|imagem|imagens|banner|banners|print|prints|tabela|tabelas|catalogo|catálogo)\b/i.test(userLower);
+  if (!askedForMedia) {
+    cleaned = cleaned.replace(/\[(?:ENVIAR_IMAGEM|ENVIAR_FOTO):\s*[^\]]+\]/gi, '').trim();
+  }
+
+  // 2. Expressões de boas-vindas proibidas em conversas em andamento
+  const welcomePatterns = [
+    /^Olá!?(?:\s+Tudo bem\??)?(?:\s*😊)?\s*Seja bem-vindo\(a\)!?\s*/i,
+    /^Seja bem-vindo\(a\)!?\s*/i,
+    /^Bem-vindo\(a\)!?\s*/i,
+    /^Olá,\s*seja bem-vindo\(a\)!?\s*/i,
+  ];
+
+  let hadWelcome = false;
+  for (const pat of welcomePatterns) {
+    if (pat.test(cleaned)) {
+      cleaned = cleaned.replace(pat, '').trim();
+      hadWelcome = true;
+      break;
+    }
+  }
+
+  const isGreetingOnly = /^(ol[aá]|oi|oie|bom dia|boa tarde|boa noite|opa|salve)[\s!.]*$/i.test(userLower);
+  const isJustHelpPrompt = /^(como posso te ajudar( hoje)?\??|\s*)$/i.test(cleaned.trim());
+
+  if (isGreetingOnly && (hadWelcome || isJustHelpPrompt)) {
+    return 'Opa! Tudo bem? 😊 Como posso te ajudar agora? Conseguiu dar uma olhada no sistema ou ficou com alguma dúvida?';
+  }
+
+  if (hadWelcome && cleaned.length > 0) {
+    cleaned = cleaned.replace(/^como posso te ajudar( hoje)?\??\s*/i, '').trim();
+    if (!cleaned) {
+      return 'Opa! Tudo certo? Como posso te ajudar agora? Ficou com alguma dúvida? 😊';
+    }
+    return cleaned;
+  }
+
+  return cleaned;
 }
 
 function splitIntoWhatsAppMessages(text) {
@@ -105,9 +157,38 @@ async function fetchActiveAgentFromSupabase() {
   return globalStore.cachedAgent || null;
 }
 
-async function callGeminiAI(systemPrompt, userMessage) {
+async function callGeminiAI(systemPrompt, userMessage, conversationHistory = []) {
   const models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash'];
   let lastError = null;
+
+  // Garante que o histórico não comece com mensagem de assistente/model
+  let validHistory = [...conversationHistory];
+  while (validHistory.length > 0 && validHistory[0].role === 'assistant') {
+    validHistory.shift();
+  }
+
+  // Agrupa mensagens consecutivas do mesmo papel (Gemini exige alternância de turnos user/model)
+  const contents = [];
+  for (const h of validHistory) {
+    const geminiRole = h.role === 'assistant' ? 'model' : 'user';
+    if (contents.length > 0 && contents[contents.length - 1].role === geminiRole) {
+      contents[contents.length - 1].parts[0].text += '\n\n' + h.text;
+    } else {
+      contents.push({
+        role: geminiRole,
+        parts: [{ text: h.text }],
+      });
+    }
+  }
+
+  if (contents.length > 0 && contents[contents.length - 1].role === 'user') {
+    contents[contents.length - 1].parts[0].text += '\n\n' + userMessage;
+  } else {
+    contents.push({
+      role: 'user',
+      parts: [{ text: userMessage }],
+    });
+  }
 
   for (const model of models) {
     try {
@@ -119,12 +200,7 @@ async function callGeminiAI(systemPrompt, userMessage) {
           system_instruction: {
             parts: [{ text: systemPrompt }],
           },
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: userMessage }],
-            },
-          ],
+          contents,
           generationConfig: {
             temperature: 0.7,
             maxOutputTokens: 1000,
@@ -189,6 +265,23 @@ export default async function handler(req, res) {
       'agente_james_test'
     ).trim();
 
+    // Lista de instâncias autorizadas a rodar este agente de IA
+    const allowedInstancesRaw = process.env.ALLOWED_INSTANCES || process.env.EVOLUTION_INSTANCE_NAME || 'agente_james_test,85986120194';
+    const allowedInstances = allowedInstancesRaw
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean);
+
+    // Validação rigorosa: descarta imediatamente qualquer evento de instâncias terceiras
+    if (instanceName && !allowedInstances.includes(instanceName.toLowerCase())) {
+      console.log(`[Vercel Webhook] 🛑 Instância não autorizada recebida: "${instanceName}". Evento ignorado com segurança.`);
+      return res.status(200).json({
+        success: true,
+        ignored: true,
+        reason: `Instância "${instanceName}" não está autorizada para este agente de IA.`
+      });
+    }
+
     const rawData = body.data || body;
     let msgs = [];
     if (Array.isArray(rawData)) {
@@ -212,13 +305,27 @@ export default async function handler(req, res) {
       const keyId = msg.key?.id || '';
       const fromMe = Boolean(msg.key?.fromMe);
       const remoteJid = msg.key?.remoteJid || '';
+      const remoteJidAlt = msg.key?.remoteJidAlt || '';
 
       // Ignora transmissões e grupos
       if (remoteJid.includes('@broadcast') || remoteJid.includes('@g.us')) {
         continue;
       }
 
-      const targetPhone = normalizePhone(msg.key?.remoteJidAlt || remoteJid);
+      // Mapeia LID para número de telefone canônico
+      if (remoteJid.includes('@lid') && remoteJidAlt.includes('@s.whatsapp.net')) {
+        const cLid = normalizePhone(remoteJid);
+        const cPh = normalizePhone(remoteJidAlt);
+        if (cLid && cPh) {
+          globalStore.lidToPhone.set(cLid, cPh);
+          globalStore.phoneToLid.set(cPh, cLid);
+        }
+      }
+
+      let targetPhone = normalizePhone(remoteJidAlt || remoteJid);
+      if (globalStore.lidToPhone.has(targetPhone)) {
+        targetPhone = globalStore.lidToPhone.get(targetPhone);
+      }
       if (!targetPhone) continue;
 
       // Evita loops e mensagens duplicadas
@@ -363,12 +470,84 @@ REGRAS OBRIGATÓRIAS DE ENVIO DE MÍDIAS:
 ---`
         : '';
 
-      const fullPrompt = `${basePrompt}\n${formattingInstruction}\n${mediaInstruction}`;
+      // Busca histórico recente para manter o contexto da conversa e evitar repetições
+      const conversationHistory = [];
+      try {
+        const cleanLid = globalStore.phoneToLid.get(targetPhone) || (remoteJid.includes('@lid') ? normalizePhone(remoteJid) : '');
+        const fetchPromises = [
+          fetch(`${EVOLUTION_API_URL}/chat/findMessages/${encodeURIComponent(instanceName)}?page=1`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', apikey: EVOLUTION_API_KEY },
+            body: JSON.stringify({ where: { key: { remoteJid: `${targetPhone}@s.whatsapp.net` } } }),
+          }).then(r => r.json()).catch(() => ({})),
+        ];
 
-      console.log(`[Vercel Webhook] 🤖 Gerando resposta Gemini 24/7 para +${targetPhone}: "${userMessage}"`);
+        if (cleanLid && cleanLid !== targetPhone) {
+          fetchPromises.push(
+            fetch(`${EVOLUTION_API_URL}/chat/findMessages/${encodeURIComponent(instanceName)}?page=1`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', apikey: EVOLUTION_API_KEY },
+              body: JSON.stringify({ where: { key: { remoteJid: `${cleanLid}@lid` } } }),
+            }).then(r => r.json()).catch(() => ({}))
+          );
+        }
+
+        const historyResults = await Promise.all(fetchPromises);
+        const allRecords = [];
+        const seenRecIds = new Set();
+        for (const hr of historyResults) {
+          const recs = hr?.messages?.records || (Array.isArray(hr) ? hr : []);
+          for (const rec of recs) {
+            const rid = rec.id || rec.key?.id;
+            if (rid && seenRecIds.has(rid)) continue;
+            if (rid) seenRecIds.add(rid);
+            allRecords.push(rec);
+          }
+        }
+
+        allRecords
+          .filter(r => (r.id !== msgId && r.key?.id !== keyId))
+          .sort((a, b) => (Number(a.messageTimestamp) || 0) - (Number(b.messageTimestamp) || 0))
+          .slice(-20)
+          .forEach(r => {
+            const txt = r.message?.conversation || r.message?.extendedTextMessage?.text || (r.message?.imageMessage?.caption ? `[Imagem: ${r.message.imageMessage.caption}]` : '');
+            if (txt && txt.trim()) {
+              conversationHistory.push({
+                role: r.key?.fromMe ? 'assistant' : 'user',
+                text: txt.trim(),
+              });
+            }
+          });
+      } catch (err) {
+        console.warn('[Vercel Webhook] Erro ao buscar histórico da conversa:', err.message);
+      }
+
+      let ongoingNotice = '';
+      if (conversationHistory.length > 0) {
+        ongoingNotice = `
+---
+## ⚠️ ATENÇÃO MÁXIMA: CONVERSA JÁ EM ANDAMENTO (${conversationHistory.length} mensagens no histórico):
+- O cliente JÁ ESTÁ conversando com você. Este NÃO é o primeiro contato.
+- PROIBIDO: NUNCA envie saudações de boas-vindas ("Olá! Tudo bem? 😊 Seja bem-vindo(a)...", "Seja bem-vindo(a)!", etc.).
+- PROIBIDO: NUNCA pergunte "Como posso te ajudar hoje?" como se fosse o início da conversa.
+- PROIBIDO: NUNCA pergunte qual anúncio ele viu ou qual sistema deseja conhecer.
+- PROIBIDO: NUNCA envie fotos/banners promocionais iniciais.
+- SE O CLIENTE ENVIAR APENAS CUMPRIMENTO ("ola", "oi", "bom dia", "boa tarde", "boa noite", etc.):
+  Responda com brevidade e naturalidade de continuidade, por exemplo:
+  "Opa! Tudo bem? 😊 Como posso te ajudar agora? Conseguiu ver o link do teste ou ficou com alguma dúvida?"
+- SE O CLIENTE ENVIAR FEEDBACK OU AGRADECIMENTO CURTO ("show", "top", "legal", "beleza", "ok", "👍", "valeu"):
+  Responda de forma receptiva, curta e cordial:
+  "Show de bola! Qualquer dúvida durante o teste ou na configuração, só me chamar por aqui. Bom proveito! 😊"
+- OBRIGATÓRIO: Responda DIRETAMENTE à última mensagem enviada pelo cliente ("${userMessage}"), dando continuidade natural à conversa e tirando dúvidas de onde parou.
+---`;
+      }
+
+      const fullPrompt = `${basePrompt}\n${ongoingNotice}\n${formattingInstruction}\n${mediaInstruction}`;
+
+      console.log(`[Vercel Webhook] 🤖 Gerando resposta Gemini 24/7 para +${targetPhone} (Histórico: ${conversationHistory.length} msgs): "${userMessage}"`);
 
       // Gera resposta com Gemini
-      const rawResponse = await callGeminiAI(fullPrompt, userMessage);
+      const rawResponse = await callGeminiAI(fullPrompt, userMessage, conversationHistory);
 
       // Verificação pós-geração: se durante a geração o operador assumiu, descarta!
       if (isContactPaused(instanceName, targetPhone)) {
@@ -384,6 +563,13 @@ REGRAS OBRIGATÓRIAS DE ENVIO DE MÍDIAS:
         requestedImageKeys.push(match[1].trim());
       }
 
+      // Descarta fotos promocionais não solicitadas em conversas já em andamento
+      const userLower = (userMessage || '').toLowerCase();
+      const askedForMedia = /\b(foto|fotos|imagem|imagens|banner|banners|print|prints|tabela|tabelas|catalogo|catálogo)\b/i.test(userLower);
+      if (conversationHistory.length > 0 && !askedForMedia) {
+        requestedImageKeys.length = 0;
+      }
+
       // Extrai tags de áudios: [ENVIAR_AUDIO: id] ou [ENVIAR_VOZ: id]
       const audioTagRegex = /\[(?:ENVIAR_AUDIO|ENVIAR_VOZ):\s*([^\]]+)\]/gi;
       const requestedAudioKeys = [];
@@ -392,10 +578,13 @@ REGRAS OBRIGATÓRIAS DE ENVIO DE MÍDIAS:
       }
 
       // Limpa tags do texto final
-      const cleanedResponse = rawResponse
+      let cleanedResponse = rawResponse
         .replace(imageTagRegex, '')
         .replace(audioTagRegex, '')
         .trim();
+
+      // Sanitiza resposta para eliminar qualquer resquício de repetição de boas-vindas
+      cleanedResponse = sanitizeOngoingResponse(cleanedResponse, userMessage, conversationHistory.length);
       const textChunks = splitIntoWhatsAppMessages(cleanedResponse);
 
       // 1. Envia os balões de texto para o WhatsApp

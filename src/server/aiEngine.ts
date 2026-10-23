@@ -29,16 +29,34 @@ export async function generateAIResponse(params: {
     if (preferredModel !== 'gemini-3.5-flash-lite') candidateModels.push('gemini-3.5-flash-lite');
     if (preferredModel !== 'gemini-3.5-flash') candidateModels.push('gemini-3.5-flash');
 
-    const contents = [
-      ...conversationHistory.map(h => ({
-        role: h.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: h.text }],
-      })),
-      {
+    // Garante que o histórico não comece com mensagem de assistente/model
+    let validHistory = [...conversationHistory];
+    while (validHistory.length > 0 && validHistory[0].role === 'assistant') {
+      validHistory.shift();
+    }
+
+    // Agrupa mensagens consecutivas do mesmo papel (Gemini exige alternância de turnos user/model)
+    const contents: any[] = [];
+    for (const h of validHistory) {
+      const geminiRole = h.role === 'assistant' ? 'model' : 'user';
+      if (contents.length > 0 && contents[contents.length - 1].role === geminiRole) {
+        contents[contents.length - 1].parts[0].text += '\n\n' + h.text;
+      } else {
+        contents.push({
+          role: geminiRole,
+          parts: [{ text: h.text }],
+        });
+      }
+    }
+
+    if (contents.length > 0 && contents[contents.length - 1].role === 'user') {
+      contents[contents.length - 1].parts[0].text += '\n\n' + userMessage;
+    } else {
+      contents.push({
         role: 'user',
         parts: [{ text: userMessage }],
-      },
-    ];
+      });
+    }
 
     let lastError: any = null;
     for (const currentModel of candidateModels) {

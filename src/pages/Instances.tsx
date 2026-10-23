@@ -313,6 +313,7 @@ const Instances: React.FC = () => {
   const [rawInstances, setRawInstances] = useState<EvolutionRawInstance[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [linkedMap, setLinkedMap] = useState<Record<string, string>>({});
+  const [filterMode, setFilterMode] = useState<'linked' | 'all'>('linked');
   const [isLoading, setIsLoading] = useState(true);
   const [showNewModal, setShowNewModal] = useState(false);
   const [showLogsModal, setShowLogsModal] = useState(false);
@@ -506,8 +507,52 @@ const Instances: React.FC = () => {
           </div>
         </div>
         <div style={{ fontSize: '12px', color: '#8fa3c8' }}>
-          Total de instâncias: <strong style={{ color: '#e8f0fe' }}>{instances.length}</strong>
+          Total no servidor: <strong style={{ color: '#e8f0fe' }}>{instances.length}</strong>
         </div>
+      </div>
+
+      {/* Tabs de Filtro: Minhas Instâncias vs Todas do Servidor */}
+      <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
+        <button
+          onClick={() => setFilterMode('linked')}
+          style={{
+            padding: '9px 18px',
+            borderRadius: '10px',
+            fontSize: '13px',
+            fontWeight: 600,
+            cursor: 'pointer',
+            border: '1px solid',
+            background: filterMode === 'linked' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(15, 22, 41, 0.5)',
+            borderColor: filterMode === 'linked' ? '#3b82f6' : 'rgba(99, 179, 237, 0.15)',
+            color: filterMode === 'linked' ? '#93c5fd' : '#8fa3c8',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            transition: 'all 0.2s ease',
+          }}
+        >
+          ⭐ Instâncias deste Agente IA ({instances.filter((inst, idx) => Boolean(linkedMap[rawInstances[idx]?.name || inst.name.split(' ')[0]] || (rawInstances[idx]?.name || inst.name.split(' ')[0]) === 'agente_james_test')).length})
+        </button>
+        <button
+          onClick={() => setFilterMode('all')}
+          style={{
+            padding: '9px 18px',
+            borderRadius: '10px',
+            fontSize: '13px',
+            fontWeight: 600,
+            cursor: 'pointer',
+            border: '1px solid',
+            background: filterMode === 'all' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(15, 22, 41, 0.5)',
+            borderColor: filterMode === 'all' ? '#3b82f6' : 'rgba(99, 179, 237, 0.15)',
+            color: filterMode === 'all' ? '#93c5fd' : '#8fa3c8',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            transition: 'all 0.2s ease',
+          }}
+        >
+          🌐 Todas as Instâncias do Servidor ({instances.length})
+        </button>
       </div>
 
       {/* Instances list / loading */}
@@ -531,11 +576,19 @@ const Instances: React.FC = () => {
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: '16px' }}>
-          {instances.map((instance, idx) => {
-            const raw = rawInstances[idx] || ({} as EvolutionRawInstance);
-            const statusInfo = statusLabels[instance.connection_status] || statusLabels.disconnected;
-            const cleanRawName = raw.name || instance.name.split(' ')[0];
-            const currentLinkedAgentId = linkedMap[cleanRawName] || '';
+          {instances
+            .map((instance, idx) => ({
+              instance,
+              raw: rawInstances[idx] || ({} as EvolutionRawInstance),
+              cleanRawName: rawInstances[idx]?.name || instance.name.split(' ')[0],
+            }))
+            .filter(item => {
+              if (filterMode === 'all') return true;
+              return Boolean(linkedMap[item.cleanRawName] || item.cleanRawName === 'agente_james_test');
+            })
+            .map(({ instance, raw, cleanRawName }) => {
+              const statusInfo = statusLabels[instance.connection_status] || statusLabels.disconnected;
+              const currentLinkedAgentId = linkedMap[cleanRawName] || '';
 
             return (
               <div key={instance.id} className="glass-card" style={{ padding: '24px' }}>

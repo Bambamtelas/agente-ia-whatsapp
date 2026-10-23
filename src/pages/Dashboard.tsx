@@ -62,20 +62,47 @@ const Dashboard: React.FC = () => {
     async function loadDashboard() {
       setLoading(true);
       try {
-        const [agentsRes, instRes] = await Promise.allSettled([
+        const [agentsRes, instRes, linksRes] = await Promise.allSettled([
           fetchAgents(),
           fetchEvolutionInstances(),
+          fetch('/api/responder/links').then(r => r.json()).catch(() => []),
         ]);
 
         if (agentsRes.status === 'fulfilled') {
           setAgents(agentsRes.value.agents);
         }
-        if (instRes.status === 'fulfilled') {
-          setInstances(instRes.value.instances);
-          setRawInstances(instRes.value.raw);
 
-          // Sum message counts from evolution instances
-          const totalMsgs = instRes.value.raw.reduce((acc, curr) => acc + (curr._count?.Message || 0), 0);
+        if (instRes.status === 'fulfilled') {
+          // Obtém lista de nomes de instâncias vinculadas a este sistema
+          const linkedNames = new Set<string>();
+          if (linksRes.status === 'fulfilled' && Array.isArray(linksRes.value) && linksRes.value.length > 0) {
+            linksRes.value.forEach((l: any) => {
+              if (l?.instanceName) linkedNames.add(l.instanceName.toLowerCase().trim());
+            });
+          }
+          try {
+            const stored = localStorage.getItem('responder_linked_map');
+            if (stored) {
+              const map = JSON.parse(stored);
+              Object.keys(map).forEach(name => linkedNames.add(name.toLowerCase().trim()));
+            }
+          } catch {}
+
+          // Fallback seguro: se nenhuma estiver vinculada ainda no cache, foca na instância padrão deste sistema
+          if (linkedNames.size === 0) {
+            linkedNames.add('agente_james_test');
+          }
+
+          // Filtra estritamente apenas as instâncias que pertencem a este agente/sistema
+          const matchedRaw = instRes.value.raw.filter(i => linkedNames.has(i.name.toLowerCase().trim()));
+          const matchedInstances = instRes.value.instances.filter(i => linkedNames.has(i.name.toLowerCase().trim()));
+
+          // Se nenhuma das vinculadas foi encontrada na API, mostra vazio ou apenas as do sistema
+          setInstances(matchedInstances);
+          setRawInstances(matchedRaw);
+
+          // Soma contagem de mensagens EXCLUSIVAMENTE das instâncias deste sistema
+          const totalMsgs = matchedRaw.reduce((acc, curr) => acc + (curr._count?.Message || 0), 0);
           setTotalMessages(totalMsgs);
         }
       } finally {
@@ -110,7 +137,7 @@ const Dashboard: React.FC = () => {
         <StatCard
           title="Instâncias WhatsApp"
           value={loading ? '...' : connectedInstances}
-          subtitle={`de ${instances.length} ativas na Evolution API`}
+          subtitle={`de ${instances.length} vinculada${instances.length !== 1 ? 's' : ''} ao agente`}
           icon={<Smartphone size={22} />}
           color="#10b981"
           glow="rgba(16, 185, 129, 0.15)"
@@ -118,7 +145,7 @@ const Dashboard: React.FC = () => {
         <StatCard
           title="Conversas Conectadas"
           value={loading ? '...' : rawInstances.reduce((acc, i) => acc + (i._count?.Chat || 0), 0).toLocaleString('pt-BR')}
-          subtitle="Chats registrados na API"
+          subtitle="Chats do agente vinculado"
           icon={<MessageSquare size={22} />}
           color="#8b5cf6"
           glow="rgba(139, 92, 246, 0.15)"
@@ -126,7 +153,7 @@ const Dashboard: React.FC = () => {
         <StatCard
           title="Mensagens Processadas"
           value={loading ? '...' : totalMessages.toLocaleString('pt-BR')}
-          subtitle="Histórico das instâncias"
+          subtitle="Histórico da instância vinculada"
           icon={<TrendingUp size={22} />}
           color="#f59e0b"
           glow="rgba(245, 158, 11, 0.15)"
@@ -212,7 +239,7 @@ const Dashboard: React.FC = () => {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <Smartphone size={18} color="#10b981" />
-              <span style={{ fontSize: '15px', fontWeight: 600, color: '#e8f0fe' }}>Instâncias Evolution API</span>
+              <span style={{ fontSize: '15px', fontWeight: 600, color: '#e8f0fe' }}>Instâncias Vinculadas ao Agente</span>
             </div>
             <Link to="/instances" style={{
               display: 'flex',
@@ -222,14 +249,15 @@ const Dashboard: React.FC = () => {
               color: '#3b82f6',
               textDecoration: 'none',
             }}>
-              Ver todas <ArrowRight size={12} />
+              Gerenciar instâncias <ArrowRight size={12} />
             </Link>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             {instances.length === 0 ? (
               <div style={{ padding: '30px 10px', textAlign: 'center', color: '#8fa3c8', fontSize: '13px' }}>
-                Nenhuma instância encontrada na Evolution API.
+                Nenhuma instância vinculada a este agente ainda.<br />
+                <span style={{ fontSize: '11px', color: '#4a6080' }}>Acesse "Gerenciar instâncias" para ativar seu agente.</span>
               </div>
             ) : (
               instances.slice(0, 4).map((instance, idx) => {

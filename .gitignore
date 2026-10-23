@@ -26,6 +26,8 @@ Thumbs.db
 .responder-seen.json
 .human-pauses.json
 .ai-sent-ids.json
+.chat-histories.json
+.lid-phone-map.json
 scratch/
 
 
